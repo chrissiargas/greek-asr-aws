@@ -251,6 +251,7 @@ if __name__ == "__main__":
     parser.add_argument('--machine', type=str, default='kronos')
     parser.add_argument('--datetime', type=str, default=None)
     parser.add_argument('--turn', type=str, default=None)
+    parser.add_argument('--stage', type=int, default=None)
 
     args, unknown = parser.parse_known_args()
 
@@ -269,7 +270,8 @@ if __name__ == "__main__":
         'bit4': True,
         'machine': args.machine,
         'datetime': args.datetime,
-        'turn': args.turn
+        'turn': args.turn,
+        'stage': args.stage
     }
 
     if base_info['datetime'] is None:

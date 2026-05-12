@@ -9,7 +9,7 @@ import json
 from transformers import GenerationConfig, Seq2SeqTrainingArguments
 from typing import Dict, List
 import socket
-
+from config.parser import Args
 
 def get_tags(args: Dict, datasets: List[str]):
     tags = []
@@ -123,12 +123,14 @@ def init(model_type, info, restart=True, exp: int = 0):
 
     info['model_name'] = model_name
 
-    checkpoint_path, checkpoint_dir, writer, date, loaded_args = get_checkpoint(args.checkpoint_path, info, model_name,
-                                                                                restart)
+    checkpoint_path, checkpoint_dir, writer, date, loaded_args = get_checkpoint(args.checkpoint_path, info, model_name, restart)
 
     if loaded_args is not None:
         args = loaded_args
-
+        restored_args = Args()
+        for key, value in args.items():
+            setattr(restored_args, key, value)
+        args = restored_args
     else:
         config_file = os.path.join(checkpoint_path, 'config.json')
         with open(config_file, 'w') as f:

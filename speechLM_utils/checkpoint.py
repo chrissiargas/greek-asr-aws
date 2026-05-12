@@ -18,6 +18,16 @@ def get_max_step(checkpoint_dir):
 
     return max_step
 
+def get_min_step(checkpoint_dir):
+    min_step = 1000000000
+    for filename in os.listdir(checkpoint_dir):
+        if isdir(join(checkpoint_dir, filename)) and filename.startswith(
+            "checkpoint"
+        ):
+            min_step = min(min_step, int(filename.replace("checkpoint-", "")))
+
+    return min_step
+
 def get_last_checkpoint(checkpoint_dir):
     if isdir(checkpoint_dir):
         is_completed = exists(join(checkpoint_dir, "completed"))
@@ -64,16 +74,6 @@ def get_checkpoint(checkpoints_path: str, info: Dict, model_name: str, restart: 
     writer = SummaryWriter(log_dir=checkpoint_path)
 
     if load:
-        if 'turn' in info and info['turn'] is not None:
-            checkpoint_dir = join(checkpoint_path, f"checkpoint-{info['turn']}")
-        else:
-            max_step = get_max_step(checkpoint_path)
-            checkpoint_dir = join(checkpoint_path, f"checkpoint-{max_step}")
-            info['turn'] = max_step
-
-        if checkpoint_dir is not None:
-            print(f"Found checkpoint at: {checkpoint_dir}")
-
         config_file = join(checkpoint_path, 'config.json')
         if os.path.exists(config_file):
             print(f"Loading model configuration strictly from {config_file}...")
@@ -82,6 +82,20 @@ def get_checkpoint(checkpoints_path: str, info: Dict, model_name: str, restart: 
         else:
             print(f"WARNING: args.json not found in {checkpoint_path}. Falling back to codebase YAML.")
             args = None
+
+        if 'stage' in info and info['stage'] is not None:
+            checkpoint_path = join(checkpoint_path, f"stage{info['stage']}")
+
+        if 'turn' in info and info['turn'] is not None:
+            checkpoint_dir = join(checkpoint_path, f"checkpoint-{info['turn']}")
+        else:
+            min_step = get_min_step(checkpoint_path)
+            checkpoint_dir = join(checkpoint_path, f"checkpoint-{min_step}")
+            info['turn'] = min_step
+
+        if checkpoint_dir is not None:
+            print(f"Found checkpoint at: {checkpoint_dir}")
+
     else:
         checkpoint_dir = None
         args = None

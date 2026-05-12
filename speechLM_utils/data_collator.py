@@ -83,7 +83,7 @@ class DataCollator(object):
 
         if self.prompt_verbatim:
             tags = ["Κατά λέξη μεταγραφή: "
-                    if x.get('dataset_name', '') in ['common_voice', 'fleurs', 'logotypographia']
+                    if x.get('dataset_name', '') in ['common_voice', 'fleurs', 'logotypographia', 'stoma']
                     else "Κανονικοποιημένη μεταγραφή: " for x in instances]
 
             tag_tokens = self.language_tokenizer(

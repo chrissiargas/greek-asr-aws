@@ -2,7 +2,7 @@ from typing import Dict
 
 from speechLM_utils.dual_fusion_model import DualFusionModel
 import torch
-from speechLM_utils.checkpoint import get_max_step
+from speechLM_utils.checkpoint import get_max_step, get_min_step
 import os
 import torch.nn as nn
 from os.path import join
@@ -10,8 +10,8 @@ import json
 import safetensors
 
 def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str = 'cuda'):
-    max_step = get_max_step(checkpoint_path)
-    weights_checkpoint = join(checkpoint_path, f"checkpoint-{max_step}")
+    min_step = get_min_step(checkpoint_path)
+    weights_checkpoint = join(checkpoint_path, f"checkpoint-{min_step}")
     print('Found checkpoint to load: ', weights_checkpoint)
 
     index_file = os.path.join(weights_checkpoint, "model.safetensors.index.json")
@@ -49,8 +49,8 @@ def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str
             print(f"[{device}] WARNING: No projector/adapter keys found in Stage 1 checkpoint!")
 
         missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
-        print('Missing keys:', missing_keys)
-        print('Unexpected keys:', unexpected_keys)
+        print('Missing keys:', len(missing_keys))
+        print('Unexpected keys:', len(unexpected_keys))
 
         missing_cross_attn = [k for k in missing_keys if 'cross_attention' in k]
         if missing_cross_attn:
@@ -62,7 +62,7 @@ def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str
     except Exception as e:
         print(f"[{device}] Error: Could not load weights. {e}")
 
-    return model, max_step
+    return model, min_step
 
 def get_model(model_type, args: Dict, info: Dict, device = 'cuda', exp: int = 0, attn_implementation: str = 'sdpa'):
     if model_type == 'dual_fusion':
