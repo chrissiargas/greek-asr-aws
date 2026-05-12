@@ -38,6 +38,19 @@ from speechLM_utils.model import get_max_step
 import argparse
 import torchaudio
 
+import torchaudio
+from IPython.display import Audio, display
+
+
+def play_audio_sample(audio_path):
+    waveform, sample_rate = torchaudio.load(audio_path)
+
+    if sample_rate != 16000:
+        resampler = torchaudio.transforms.Resample(sample_rate, 16000)
+        waveform = resampler(waveform)
+
+    display(Audio(waveform.numpy(), rate=16000))
+
 def load_model(model_type, args, info, checkpoint_path, checkpoint_dir=None, device='cuda'):
     print(f"Initializing model...")
 
@@ -85,19 +98,13 @@ def load_model(model_type, args, info, checkpoint_path, checkpoint_dir=None, dev
 def run_custom_task(info, device='cuda'):
     conf, args, _, bad_folder, _, checkpoint_path, checkpoint_dir, _ = init(info['model_type'], info, restart=False)
 
-    print(f"Asking model \"{info['prompt']}\" for audio file: {info['audio_file']} ...")
-
-    training_args = conf.eval_args.training_args
-    training_args['report_to'] = "none"
-    training_args['generation_config'] = GenerationConfig(**training_args['generation_config'])
-    training_args['disable_tqdm'] = True
-    training_args = Seq2SeqTrainingArguments(**training_args)
+    print(f"Loading Model ...")
 
     args['prompt_instruction'] = info['prompt']
     model = load_model(info['model_type'], args, info, checkpoint_path, checkpoint_dir, device)
     tokenizer = model.language_tokenizer
 
-    raw_audio, sample_rate = torchaudio.load(audio_path)
+    raw_audio, sample_rate = torchaudio.load(info['audio_file'])
     if sample_rate != 16000:
         resampler = torchaudio.transforms.Resample(sample_rate, 16000)
         raw_audio = resampler(raw_audio)
@@ -174,6 +181,7 @@ if __name__ == "__main__":
         base_info['audio_file'] = args.audio_file
         base_info['prompt'] = args.prompt
 
+        play_audio_sample(args.audio_file)
         run_custom_task(base_info, device='cuda')
 
     finally:
