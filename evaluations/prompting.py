@@ -96,7 +96,6 @@ def run_custom_task(info, device='cuda'):
 
     print(f"Loading Model ...")
 
-    args['prompt_instruction'] = info['prompt']
     model = load_model(info['model_type'], args, info, checkpoint_path, checkpoint_dir, device)
     tokenizer = model.language_tokenizer
 
@@ -104,6 +103,7 @@ def run_custom_task(info, device='cuda'):
     if sample_rate != 16000:
         resampler = torchaudio.transforms.Resample(sample_rate, 16000)
         raw_audio = resampler(raw_audio)
+        raw_audio = raw_audio.squeeze().numpy()
 
     input = model.processor(
         raw_audio,
@@ -120,6 +120,12 @@ def run_custom_task(info, device='cuda'):
         do_sample=False,
         num_beams=4
     )
+
+    # 1. Update the internal instruction
+    model.prompt_instruction = info['prompt']
+
+    # 2. Refresh the embedding bank to generate new tensors for this prompt
+    model.set_embed_bank()
 
     # 3. Execution
     print(f"Executing Task: {info['prompt']}")
@@ -177,8 +183,7 @@ if __name__ == "__main__":
         base_info['audio_file'] = args.audio_file
         base_info['prompt'] = args.prompt
 
-        play_audio_sample(args.audio_file)
-        # run_custom_task(base_info, device='cuda')
+        run_custom_task(base_info, device='cuda')
 
     finally:
         pass
