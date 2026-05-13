@@ -185,15 +185,29 @@ class InjectionLayer(nn.Module):
         self.prompt_audio = None
         self.prompt_audio_mask = None
 
+    def _expand_to_batch(self, tensor, target_batch_size):
+        if tensor is not None and tensor.shape[0] != target_batch_size:
+            # repeat_interleave matches how HF expands batches for beam search
+            repeat_factor = target_batch_size // tensor.shape[0]
+            return tensor.repeat_interleave(repeat_factor, dim=0)
+        return tensor
+
     def forward(self, hidden_states, *args, **kwargs):
         lm_outputs = self.LM_layer(hidden_states, *args, **kwargs)
         lm_hidden_states = lm_outputs[0]
 
+        target_batch_size = lm_hidden_states.shape[0]
+
+        injection_audio = self._expand_to_batch(self.injection_audio, target_batch_size)
+        injection_audio_mask = self._expand_to_batch(self.injection_audio_mask, target_batch_size)
+        prompt_audio = self._expand_to_batch(self.prompt_audio, target_batch_size)
+        prompt_audio_mask = self._expand_to_batch(self.prompt_audio_mask, target_batch_size)
+
         fused_hidden_states = self.cross_attention_layer(lm_hidden_states,
-                                                           self.injection_audio,
-                                                           self.prompt_audio,
-                                                           self.injection_audio_mask,
-                                                           self.prompt_audio_mask)
+                                                           injection_audio,
+                                                           prompt_audio,
+                                                           injection_audio_mask,
+                                                           prompt_audio_mask)
 
         rest = lm_outputs[1:] if len(lm_outputs) > 1 else ()
         if isinstance(rest, torch.Tensor):

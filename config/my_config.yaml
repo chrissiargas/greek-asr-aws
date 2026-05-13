@@ -27,8 +27,8 @@ dual_fuse_args:
   ## Regularization & Augmentation Configurations
   blank_training: False
   audio_dropout: 0.1
-  text_perturbation: False
-  text_dropout: 0.1
+  text_perturbation: True 
+  text_dropout: 0.15
   spec_augment: True
   ## Input Injection Configurations
   include_adapter: True
@@ -38,7 +38,7 @@ dual_fuse_args:
   input_downsample: 'reshape'
   ## Cross-Attention Injection Configurations
   static_injection_layers: False
-  downsample_L: 5
+  downsample_L: 2
   injection_downsample: 'conv1d'
   injection_layers: [10, 20, 30]
   pyramid_layers: False
@@ -49,10 +49,10 @@ dual_fuse_args:
   ## LoRA Configurations
   linguistic_lora: True
   acoustic_lora: False
-  lora_params: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  lora_params: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   proj_lr: 0.0001
   lora_lr: 0.0001
-  two_stage: False
+  two_stage: True 
   ## Auxiliary Losses Configurations
   predict_duration: False
   duration_resolution: 0.1
@@ -64,18 +64,18 @@ dual_fuse_args:
   audio_weight: 0.4
   ## Training Behavior Configurations
   early_stopping_patience: 15
-  first_stage_epochs: 20
-  second_stage_epochs: 20
+  first_stage_epochs: 15
+  second_stage_epochs: 5
   ## Prompt Configurations
   prompt_persona: none
   prompt_instruction: "\nΜετάγραψε το προηγούμενο ηχητικό απόσπασμα σε ελληνικό κείμενο με απόλυτη ακρίβεια."
-  prompt_verbatim: False
+  prompt_verbatim: True 
   training_args: {
     # --- PERFORMANCE OPTIMIZATIONS ---
     'bf16': True,                   # CRITICAL: Native speed for Titan RTX
     'dataloader_num_workers': 4,    # Optimized for 14-core CPU (3 workers * 4 GPUs = 12 threads)
     'dataloader_pin_memory': True,  # Fast CPU->GPU transfer
-    'per_device_train_batch_size': 2, # Maximize VRAM usage
+    'per_device_train_batch_size': 4, # Maximize VRAM usage
     'gradient_accumulation_steps': 4,  # Effective Batch = 8 * 4 * 2 = 96
     'gradient_checkpointing': True,
     'gradient_checkpointing_kwargs': {'use_reentrant': False},
@@ -88,7 +88,7 @@ dual_fuse_args:
 
     # --- LOGGING & SAVING ---
     'report_to': 'wandb',
-    'logging_steps': 10,
+    'logging_steps': 50,
     'save_strategy': 'steps',
     'save_steps': 1000,
     'eval_strategy': 'steps',
@@ -130,6 +130,7 @@ eval_args:
     'eval_strategy': 'no',
     'report_to': 'none',
     'generation_max_length': 512,
+    'generation_num_beams': 4,
     'generation_config': {
       'num_beams': 4,
       'do_sample': False,

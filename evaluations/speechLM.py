@@ -138,8 +138,12 @@ def get_eval_metrics(data, model_type, conf, args, info, checkpoint_path, checkp
     training_args['disable_tqdm'] = True
     training_args = Seq2SeqTrainingArguments(**training_args)
 
+    gen_config_dict = training_args.pop('generation_config', {})
+
     model = load_model(model_type, args, info, checkpoint_path, checkpoint_dir, device)
     tokenizer = model.language_tokenizer
+
+    model.generation_config.update(**gen_config_dict)
 
     collator = DataCollator(processor=model.processor,
                             language_tokenizer=tokenizer,
