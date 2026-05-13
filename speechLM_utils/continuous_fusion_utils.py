@@ -1,6 +1,7 @@
 import os
 import sys
 from os.path import dirname
+
 sys.path.insert(0, dirname(dirname(os.path.abspath(__file__))))
 
 import torch
@@ -29,6 +30,7 @@ class SinusoidalPositionalEmbedding(nn.Module):
     def forward(self, x):
         seq_len = x.size(1)
         return x + self.pe[:, :seq_len, :]
+
 
 class CrossAttention(nn.Module):
     def __init__(self,
@@ -73,6 +75,15 @@ class CrossAttention(nn.Module):
 
         if self.positional_info:
             self.audio_pos_embed = SinusoidalPositionalEmbedding(d_model=audio_embed_dim, max_len=seq_len)
+
+        self.cached_key = None
+        self.cached_value = None
+        self.cached_mask = None
+
+    def clear_cache(self):
+        self.cached_key = None
+        self.cached_value = None
+        self.cached_mask = None
 
     def compute_mask(self, prm_len, prm_audio_len, inj_audio_len, device, dtype, prm_audio_mask=None,
                      inj_audio_mask=None, verbose: bool = False):
@@ -142,16 +153,30 @@ class CrossAttention(nn.Module):
             prm_audio_len = 0
 
         query = self.q_proj(self.layer_norm(hidden_states))
-
-        if self.positional_info:
-            audio_features = self.audio_pos_embed(audio_features)
-
-        key = self.k_proj(audio_features)
-        value = self.v_proj(audio_features)
-
         query = query.view(batch_size, text_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key = key.view(batch_size, inj_audio_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value = value.view(batch_size, inj_audio_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        is_decoding = (text_len == 1)
+
+        if is_decoding and self.cached_key is not None:
+            key = self.cached_key
+            value = self.cached_value
+            mask = self.cached_mask
+        else:
+            if self.positional_info:
+                audio_features = self.audio_pos_embed(audio_features)
+
+            key = self.k_proj(audio_features)
+            value = self.v_proj(audio_features)
+
+            key = key.view(batch_size, inj_audio_len, self.num_heads, self.head_dim).transpose(1, 2)
+            value = value.view(batch_size, inj_audio_len, self.num_heads, self.head_dim).transpose(1, 2)
+            mask = self.compute_mask(prm_len, prm_audio_len, inj_audio_len, hidden_states.device, hidden_states.dtype,
+                                     prm_audio_mask, inj_audio_mask)
+
+            # Save to memory
+            self.cached_key = key
+            self.cached_value = value
+            self.cached_mask = mask
 
         scores = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)
         mask = self.compute_mask(prm_len, prm_audio_len, inj_audio_len, scores.device, scores.dtype, prm_audio_mask,
@@ -173,6 +198,7 @@ class CrossAttention(nn.Module):
 
         return fused_output
 
+
 class InjectionLayer(nn.Module):
     def __init__(self, lm_layer, cross_attention_layer):
         super().__init__()
@@ -185,11 +211,17 @@ class InjectionLayer(nn.Module):
         self.prompt_audio = None
         self.prompt_audio_mask = None
 
-    def _expand_to_batch(self, tensor, target_batch_size):
+    def _expand_to_batch(self, attr_name, target_batch_size):
+        tensor = getattr(self, attr_name)
+        # Only expand if the sizes don't match
         if tensor is not None and tensor.shape[0] != target_batch_size:
-            # repeat_interleave matches how HF expands batches for beam search
             repeat_factor = target_batch_size // tensor.shape[0]
-            return tensor.repeat_interleave(repeat_factor, dim=0)
+            expanded_tensor = tensor.repeat_interleave(repeat_factor, dim=0)
+
+            # CACHE IT: Overwrite the class attribute so it never runs again for this batch
+            setattr(self, attr_name, expanded_tensor)
+            return expanded_tensor
+
         return tensor
 
     def forward(self, hidden_states, *args, **kwargs):
@@ -198,16 +230,16 @@ class InjectionLayer(nn.Module):
 
         target_batch_size = lm_hidden_states.shape[0]
 
-        injection_audio = self._expand_to_batch(self.injection_audio, target_batch_size)
-        injection_audio_mask = self._expand_to_batch(self.injection_audio_mask, target_batch_size)
-        prompt_audio = self._expand_to_batch(self.prompt_audio, target_batch_size)
-        prompt_audio_mask = self._expand_to_batch(self.prompt_audio_mask, target_batch_size)
+        injection_audio = self._expand_to_batch('injection_audio', target_batch_size)
+        injection_audio_mask = self._expand_to_batch('injection_audio_mask', target_batch_size)
+        prompt_audio = self._expand_to_batch('prompt_audio', target_batch_size)
+        prompt_audio_mask = self._expand_to_batch('prompt_audio_mask', target_batch_size)
 
         fused_hidden_states = self.cross_attention_layer(lm_hidden_states,
-                                                           injection_audio,
-                                                           prompt_audio,
-                                                           injection_audio_mask,
-                                                           prompt_audio_mask)
+                                                         injection_audio,
+                                                         prompt_audio,
+                                                         injection_audio_mask,
+                                                         prompt_audio_mask)
 
         rest = lm_outputs[1:] if len(lm_outputs) > 1 else ()
         if isinstance(rest, torch.Tensor):

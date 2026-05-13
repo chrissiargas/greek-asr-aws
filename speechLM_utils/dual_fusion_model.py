@@ -998,12 +998,12 @@ class DualFusionModel(nn.Module):
                 )
 
             finally:
-                pass
-                # for injection_layer in self.injection_layers:
-                #     injection_layer.injection_audio = None
-                #     injection_layer.injection_audio_mask = None
-                #     injection_layer.prompt_audio = None
-                #     injection_layer.prompt_audio_mask = None
+                for injection_layer in self.injection_layers:
+                    injection_layer.cross_attention_layer.clear_cache()
+                    injection_layer.injection_audio = None
+                    injection_layer.injection_audio_mask = None
+                    injection_layer.prompt_audio = None
+                    injection_layer.prompt_audio_mask = None
 
             return outputs
 
