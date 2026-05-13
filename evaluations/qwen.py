@@ -24,9 +24,11 @@ from preprocessing.normalize import normalize
 import jiwer
 import pandas as pd
 from config.parser import Parser
+from accelerate import Accelerator
 
 def get_prediction(x, device, model, processor):
-    path = x['audio_filepath']
+    path = x['audio']
+    reference = x['reference'].strip()
     index = x['index']
     duration = x['duration']
 
@@ -40,8 +42,8 @@ def get_prediction(x, device, model, processor):
             ]}
         ]
 
-        reference = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        inputs = processor(text=reference, audios=audio, return_tensors="pt", padding=True).to(device)
+        message = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        inputs = processor(text=message, audios=audio, return_tensors="pt", padding=True).to(device)
 
         with torch.inference_mode():
             generated_ids = model.generate(**inputs, max_new_tokens=512)
@@ -73,17 +75,7 @@ def get_prediction(x, device, model, processor):
     except Exception as e:
         print(f"Error processing {path}: {e}")
 
-def get_eval_metrics(data, res_folder, device = 'cuda'):
-    model_id = "Qwen/Qwen2-Audio-7B-Instruct"
-    processor = AutoProcessor.from_pretrained(model_id)
-
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
-        model_id,
-        torch_dtype=torch.bfloat16,
-        device_map=None  # Load directly to specific GPU
-    ).to(device)
-    model.eval()
-
+def get_eval_metrics(data, res_folder, accelerator, mode, processor, device = 'cuda'):
     references, predictions = [], []
     n_references, n_predictions = [], []
     wers, cers, ratios = [], [], []
@@ -91,29 +83,35 @@ def get_eval_metrics(data, res_folder, device = 'cuda'):
     subs, ins, dels = [], [], []
     indices, durations = [], []
 
-    progress_bar = tqdm(
-        data, leave=True, ncols=100, colour='blue'
-    )
+    with accelerator.split_between_processes(data) as gpu_chunk:
+        progress_bar = tqdm(
+            gpu_chunk,
+            desc=f"GPU {accelerator.process_index}",
+            disable=not accelerator.is_main_process,
+            ncols=100
+        )
 
-    for entry in progress_bar:
-        reference, prediction, n_reference, n_prediction, metrics  = get_prediction(entry, device, model, processor)
-        index, wer, n_wer, cer, n_cer, ratio, n_ratio, sub_, in_, del_, duration = metrics
+        for entry in progress_bar:
+            reference, prediction, n_reference, n_prediction, metrics  = get_prediction(entry, device, model, processor)
+            index, wer, n_wer, cer, n_cer, ratio, n_ratio, sub_, in_, del_, duration = metrics
 
-        references.append(reference)
-        predictions.append(prediction)
-        n_references.append(n_reference)
-        n_predictions.append(n_prediction)
-        wers.append(wer)
-        n_wers.append(n_wer)
-        cers.append(cer)
-        n_cers.append(n_cer)
-        ratios.append(ratio)
-        n_ratios.append(n_ratio)
-        subs.append(sub_)
-        ins.append(in_)
-        dels.append(del_)
-        indices.append(index)
-        durations.append(duration)
+            references.append(reference)
+            predictions.append(prediction)
+            n_references.append(n_reference)
+            n_predictions.append(n_prediction)
+            wers.append(wer)
+            n_wers.append(n_wer)
+            cers.append(cer)
+            n_cers.append(n_cer)
+            ratios.append(ratio)
+            n_ratios.append(n_ratio)
+            subs.append(sub_)
+            ins.append(in_)
+            dels.append(del_)
+            indices.append(index)
+            durations.append(duration)
+
+    accelerator.wait_for_everyone()
 
     results_per_instance = {'index': indices,
                             'reference': references,
@@ -189,6 +187,9 @@ def get_bad_folder(conf, data_name):
     return bad_folder
 
 def evaluate(dataset, set='test', device='cuda', iters = None):
+    accelerator = Accelerator()
+    device = accelerator.device
+
     conf = Parser()
     conf.get_args()
 
@@ -205,13 +206,27 @@ def evaluate(dataset, set='test', device='cuda', iters = None):
     data_set = get_data(data[set], bad_folder, iters=iters, normalized=False, has_duration=True, filters=FILTERS, split=set)
     data_set = concatenate(data_set)
 
+    model_id = "Qwen/Qwen2-Audio-7B-Instruct"
+
+    if accelerator.is_main_process:
+        print(f"Loading {model_id} across {accelerator.num_processes} GPUs...")
+
+    processor = AutoProcessor.from_pretrained(model_id)
+
+    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+        model_id,
+        torch_dtype=torch.bfloat16,
+        device_map=None
+    ).to(device)
+    model.eval()
+
     print(f"Evaluating on {dataset_names} ({len(data_set)} samples)...")
-    get_eval_metrics(dataset, res_folder, device)
+    get_eval_metrics(data_set, res_folder, accelerator, model, processor, device)
 
 FILTERS = ['duration', 'length']
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpus', type=str, default='0', help='GPUs to be used')
+    parser.add_argument('--gpus', type=str, default='0,1,2,3', help='GPUs to be used')
     parser.add_argument('--datasets', nargs='+', type=str, default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'], help='datasets')
 
     args, unknown = parser.parse_known_args()
