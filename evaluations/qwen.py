@@ -23,6 +23,7 @@ from speechLM_utils.utils import init_gpu, resume_wandb, init
 from preprocessing.normalize import normalize
 import jiwer
 import pandas as pd
+from config.parser import Parser
 
 def get_prediction(x, device, model, processor):
     path = x['audio_filepath']
@@ -187,7 +188,10 @@ def get_bad_folder(conf, data_name):
 
     return bad_folder
 
-def evaluate(conf, dataset, set='test', device='cuda', iters = None):
+def evaluate(dataset, set='test', device='cuda', iters = None):
+    conf = Parser()
+    conf.get_args()
+
     bad_folder = get_bad_folder(conf, dataset)
     res_folder = get_results_path(conf, dataset)
 
@@ -207,7 +211,7 @@ def evaluate(conf, dataset, set='test', device='cuda', iters = None):
 FILTERS = ['duration', 'length']
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpus', type=str, default='0,1,2,3', help='GPUs to be used')
+    parser.add_argument('--gpus', type=str, default='0', help='GPUs to be used')
     parser.add_argument('--datasets', nargs='+', type=str, default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'], help='datasets')
 
     args, unknown = parser.parse_known_args()
