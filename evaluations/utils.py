@@ -8,7 +8,6 @@ import sys
 sys.path.insert(0, dirname(dirname(abspath(__file__))))
 
 from config.parser import Parser
-from evaluations.speechLM import get_results_path
 import os
 import pandas as pd
 import numpy as np
@@ -16,8 +15,55 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict
 import argparse
-
 from bert_score import score
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import scipy.ndimage as ndimage
+
+def get_results_path(conf, args, data_specific=True):
+
+    model_type = args.get('model_type', 'dual_fusion_checkpoints')
+    model_name = args.get('model_name', 'default_model')
+
+    path_parts = [
+        os.path.expanduser('~'),
+        conf.results_path,
+        model_type
+    ]
+
+    if args.get('machine') and args.get('datetime') and args.get('turn'):
+        path_parts.extend([
+            str(args['machine']),
+            str(model_name),
+            str(args['datetime']),
+            str(args['turn'])
+        ])
+    else:
+        path_parts.append(model_name)
+
+    dataset = args.get('dataset')
+
+    if data_specific and dataset:
+        path_parts.extend([
+            dataset,
+            args.get('split', 'test')
+        ])
+
+        if args.get('name'):
+            path_parts.append(args['name'])
+
+    results_path = os.path.join(*[p for p in path_parts if p])
+    os.makedirs(results_path, exist_ok=True)
+    return results_path
+
+
+def get_plots_dir(conf, info):
+    base_res_dir = get_results_path(conf, info)
+    plots_dir = os.path.join(base_res_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+
+    return plots_dir
 
 
 def generate_semantic_drift_plot(info: Dict):
@@ -102,27 +148,22 @@ def generate_semantic_drift_plot(info: Dict):
         print(f"Plot saved successfully to: {save_path}\n")
 
 
-def get_plots_dir(conf, info, viz):
-    base_res_dir = get_results_path(conf, info, data_folder=False)
-    plots_dir = os.path.join(base_res_dir, 'plots', viz)
-    os.makedirs(plots_dir, exist_ok=True)
-
-    return plots_dir
-
-
 def aggregate_results(info: Dict):
     conf = Parser()
     conf.get_args()
-
     print("Aggregating results...")
 
     all_results = []
-    for dataset_name in DATASETS:
-        info['test_dataset'] = dataset_name
-        results_folder = get_results_path(conf, info)
-        info['res_folder'] = results_folder
+    local_info = info.copy()
 
-        results_path = os.path.join(results_folder, 'results.csv')
+    for dataset_name in DATASETS:
+        local_info['dataset'] = dataset_name
+        local_info['test_dataset'] = dataset_name
+        results_folder = get_results_path(conf, local_info, data_specific=True)
+
+        local_info['res_folder'] = results_folder
+
+        results_path = os.path.join(results_folder, 'predictions_total_metrics.csv')
         predictions_path = os.path.join(results_folder, 'predictions.csv')
 
         if os.path.exists(results_path):
@@ -142,7 +183,7 @@ def aggregate_results(info: Dict):
             except Exception as e:
                 print(f"Error reading {results_path}: {e}")
         else:
-            print(f"Warning: Could not find results for {dataset} at {results_path}")
+            print(f"Warning: Could not find results for {dataset_name} at {results_path}")
 
     if not all_results:
         return pd.DataFrame()
@@ -158,9 +199,10 @@ def aggregate_results(info: Dict):
     cols = ['dataset'] + [col for col in aggregated_df.columns if col != 'dataset']
     aggregated_df = aggregated_df[cols]
 
-    results_folder = get_results_path(conf, info, data_folder=False)
-    results_path = os.path.join(results_folder, "aggregated_results.csv")
-    aggregated_df.to_csv(results_path, index=False)
+    results_folder = get_results_path(conf, info, data_specific=False)
+    aggregated_path = os.path.join(results_folder, "aggregated_results.csv")
+    aggregated_df.to_csv(aggregated_path, index=False)
+    print(f"✅ Summary compilation saved to: {aggregated_path}")
 
     return aggregated_df
 
@@ -189,7 +231,7 @@ def compare_models(df_model1, df_model2, name_model1="Model_1", name_model2="Mod
             # Relative Error Reduction (RER)
             rer_col = f'{metric}_rer'
             comparison_df[rer_col] = (
-                        (comparison_df[col1] - comparison_df[col2]) / (comparison_df[col1] + 1e-9) * 100).round(1)
+                    (comparison_df[col1] - comparison_df[col2]) / (comparison_df[col1] + 1e-9) * 100).round(1)
 
     return comparison_df
 
@@ -198,12 +240,11 @@ def compare_models(df_model1, df_model2, name_model1="Model_1", name_model2="Mod
 def plot_sid_stacked_bar(info: Dict):
     conf = Parser()
     conf.get_args()
-
     sid_data = []
+    local_info = info.copy()
 
     for dataset_name in DATASETS:
-        local_info = info.copy()
-        local_info['test_dataset'] = dataset_name
+        local_info['dataset'] = dataset_name
         results_folder = get_results_path(conf, local_info)
         predictions_path = os.path.join(results_folder, 'predictions.csv')
 
@@ -228,9 +269,7 @@ def plot_sid_stacked_bar(info: Dict):
 
     sid_df = pd.DataFrame(sid_data).set_index('Dataset')
 
-    # Plotting
-    ax = sid_df.plot(kind='bar', stacked=True, figsize=(10, 6),
-                     color=['#ffb347', '#ff6961', '#aec6cf'], edgecolor='black')
+    ax = sid_df.plot(kind='bar', stacked=True, figsize=(10, 6), color=['#ffb347', '#ff6961', '#aec6cf'], edgecolor='black')
 
     plt.title("Proportion of Error Types per Dataset (S-I-D)", fontsize=14, pad=15)
     plt.ylabel("Percentage of Total Errors (%)", fontsize=12)
@@ -238,7 +277,6 @@ def plot_sid_stacked_bar(info: Dict):
     plt.xticks(rotation=45)
     plt.legend(title="Error Type", bbox_to_anchor=(1.05, 1), loc='upper left')
 
-    # Add percentage labels inside the bars
     for p in ax.patches:
         width, height = p.get_width(), p.get_height()
         x, y = p.get_xy()
@@ -248,8 +286,8 @@ def plot_sid_stacked_bar(info: Dict):
 
     plt.tight_layout()
 
-    save_dir = get_plots_dir(conf, info, 'sid_stacked_bar')
-    save_path = os.path.join(save_dir, f"{dataset_name}.png")
+    save_dir = get_plots_dir(conf, info)
+    save_path = os.path.join(save_dir, "sid_stacked_bar.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -257,165 +295,286 @@ def plot_sid_stacked_bar(info: Dict):
 def plot_wer_vs_duration(info: Dict):
     conf = Parser()
     conf.get_args()
-
     local_info = info.copy()
-    for dataset_name in DATASETS:
-        local_info['test_dataset'] = dataset_name
-        results_folder = get_results_path(conf, local_info)
-        predictions_path = os.path.join(results_folder, 'predictions.csv')
+    dataset_name = info['dataset']
 
-        if not os.path.exists(predictions_path):
-            print(f"No predictions found for {dataset_name} at {predictions_path}")
-            return
+    results_folder = get_results_path(conf, local_info)
+    predictions_path = os.path.join(results_folder, 'predictions.csv')
 
-        df = pd.read_csv(predictions_path)
+    if not os.path.exists(predictions_path):
+        print(f"No predictions found for {dataset_name} at {predictions_path}")
+        return
 
-        if 'duration' not in df.columns:
-            print(f"Warning: 'duration' column not found in predictions for {dataset_name}. Update metrics.py.")
-            return
+    df = pd.read_csv(predictions_path)
 
-        # Filter out extreme outliers (WER > 1.5) to keep the trendline accurate
-        plot_df = df[df['wer'] <= 1.5]
+    if 'duration' not in df.columns:
+        print(f"Warning: 'duration' column not found in predictions for {dataset_name}. Update metrics.py.")
+        return
 
-        plt.figure(figsize=(10, 6))
+    # Filter out extreme outliers (WER > 1.5) to keep the trendline accurate
+    plot_df = df[df['wer'] <= 1.5]
 
-        # Use seaborn's regplot to automatically calculate and plot the trendline
-        sns.regplot(data=plot_df, x='duration', y='wer',
-                    scatter_kws={'alpha': 0.5, 'color': '#1f77b4'},
-                    line_kws={'color': 'red', 'linewidth': 2})
+    plt.figure(figsize=(10, 6))
 
-        # Add a vertical line at 30 seconds (Whisper's typical maximum context)
-        plt.axvline(x=30.0, color='black', linestyle='--', alpha=0.7, label='Whisper 30s Limit')
+    # Use seaborn's regplot to automatically calculate and plot the trendline
+    sns.regplot(data=plot_df, x='duration', y='wer',
+                scatter_kws={'alpha': 0.5, 'color': '#1f77b4'},
+                line_kws={'color': 'red', 'linewidth': 2})
 
-        plt.title(f"WER vs. Audio Duration - {dataset_name}", fontsize=14)
-        plt.xlabel("Audio Duration (Seconds)", fontsize=12)
-        plt.ylabel("Word Error Rate (WER)", fontsize=12)
-        plt.legend()
-        plt.grid(True, linestyle=':', alpha=0.6)
-        plt.tight_layout()
+    # Add a vertical line at 30 seconds (Whisper's typical maximum context)
+    plt.axvline(x=30.0, color='black', linestyle='--', alpha=0.7, label='Whisper 30s Limit')
 
-        save_dir = get_plots_dir(conf, info, 'wer_vs_duration')
-        save_path = os.path.join(save_dir, f"{dataset_name}.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
+    plt.title(f"WER vs. Audio Duration - {dataset_name}", fontsize=14)
+    plt.xlabel("Audio Duration (Seconds)", fontsize=12)
+    plt.ylabel("Word Error Rate (WER)", fontsize=12)
+    plt.legend()
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.tight_layout()
+
+    save_dir = get_plots_dir(conf, info)
+    save_path = os.path.join(save_dir, "wer_vs_duration.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def plot_length_correlation(info: Dict):
     conf = Parser()
     conf.get_args()
-
     local_info = info.copy()
+    dataset_name = info['dataset']
 
-    for dataset_name in DATASETS:
-        local_info['test_dataset'] = dataset_name
+    results_folder = get_results_path(conf, local_info)
+    predictions_path = os.path.join(results_folder, 'predictions.csv')
 
-        results_folder = get_results_path(conf, local_info)
-        predictions_path = os.path.join(results_folder, 'predictions.csv')
+    if not os.path.exists(predictions_path):
+        print(f"No predictions found for {dataset_name} at {predictions_path}")
+        return
 
-        if not os.path.exists(predictions_path):
-            print(f"No predictions found for {dataset_name} at {predictions_path}")
-            return
+    df = pd.read_csv(predictions_path)
 
-        df = pd.read_csv(predictions_path)
+    # FIX: Handle pandas NaN loading for empty strings
+    df['reference'] = df['reference'].fillna('')
+    df['prediction'] = df['prediction'].fillna('')
 
-        # FIX: Handle pandas NaN loading for empty strings
-        df['reference'] = df['reference'].fillna('')
-        df['prediction'] = df['prediction'].fillna('')
+    df['ref_len'] = df['reference'].str.len()
+    df['pred_len'] = df['prediction'].str.len()
 
-        df['ref_len'] = df['reference'].str.len()
-        df['pred_len'] = df['prediction'].str.len()
+    plt.figure(figsize=(8, 8))
+    sns.scatterplot(data=df, x='ref_len', y='pred_len', alpha=0.5)
 
-        plt.figure(figsize=(8, 8))
-        sns.scatterplot(data=df, x='ref_len', y='pred_len', alpha=0.5)
+    # FIX: Safe max calculation in case df is entirely empty
+    max_val = max(df['ref_len'].max(), df['pred_len'].max()) if not df.empty else 100
 
-        # FIX: Safe max calculation in case df is entirely empty
-        max_val = max(df['ref_len'].max(), df['pred_len'].max()) if not df.empty else 100
+    plt.plot([0, max_val], [0, max_val], 'r--', label='Ideal (y=x)')
+    plt.xlabel("Reference Length (chars)")
+    plt.ylabel("Prediction Length (chars)")
+    plt.title(f"Length Correlation - {dataset_name}")
+    plt.legend()
+    plt.tight_layout()
 
-        plt.plot([0, max_val], [0, max_val], 'r--', label='Ideal (y=x)')
-        plt.xlabel("Reference Length (chars)")
-        plt.ylabel("Prediction Length (chars)")
-        plt.title(f"Length Correlation - {dataset_name}")
-        plt.legend()
-        plt.tight_layout()
-
-        save_dir = get_plots_dir(conf, info, 'length_correlation')
-        save_path = os.path.join(save_dir, f"{dataset_name}.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
+    save_dir = get_plots_dir(conf, info)
+    save_path = os.path.join(save_dir, "length_correlation.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def plot_wer_distribution(info: Dict):
     conf = Parser()
     conf.get_args()
-
     local_info = info.copy()
+    dataset_name = info['dataset']
 
-    for dataset_name in DATASETS:
-        local_info['test_dataset'] = dataset_name
+    results_folder = get_results_path(conf, local_info)
+    predictions_path = os.path.join(results_folder, 'predictions.csv')
 
-        results_folder = get_results_path(conf, local_info)
-        predictions_path = os.path.join(results_folder, 'predictions.csv')
+    if not os.path.exists(predictions_path):
+        print(f"No predictions found for {dataset_name} at {predictions_path}")
+        return
 
-        if not os.path.exists(predictions_path):
-            print(f"No predictions found for {dataset_name} at {predictions_path}")
-            return
+    df = pd.read_csv(predictions_path)
 
-        df = pd.read_csv(predictions_path)
+    # Prevent crash if WER column is somehow missing or empty
+    if 'wer' not in df.columns or df.empty:
+        return
 
-        # Prevent crash if WER column is somehow missing or empty
-        if 'wer' not in df.columns or df.empty:
-            return
+    plot_df = df.copy()
+    plot_df.loc[plot_df['wer'] > 1.0, 'wer'] = 1.1
 
-        plt.figure(figsize=(10, 6))
-        sns.histplot(df['wer'], bins=20, kde=True, color='skyblue')
-        plt.axvline(df['wer'].mean(), color='red', linestyle='--', label=f'Mean: {df["wer"].mean():.2f}')
-        plt.xlabel("Word Error Rate (WER)")
-        plt.title(f"WER Distribution - {dataset_name}")
-        plt.legend()
-        plt.tight_layout()
+    plt.figure(figsize=(10, 6))
+    sns.histplot(plot_df['wer'], bins=22, kde=True, color='skyblue')
+    plt.axvline(df['wer'].mean(), color='red', linestyle='--', label=f'Mean: {df["wer"].mean():.2f}')
+    plt.xlabel("Word Error Rate (WER)")
+    plt.title(f"WER Distribution - {dataset_name}")
+    plt.legend()
+    plt.tight_layout()
 
-        save_dir = get_plots_dir(conf, info, 'wer_distribution')
-        save_path = os.path.join(save_dir, f"{dataset_name}.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
+    save_dir = get_plots_dir(conf, info)
+    save_path = os.path.join(save_dir, "wer_distribution.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
+
+def examine_worst_predictions(info: Dict, top_n=10, sort_metric='n_wer'):
+    conf = Parser()
+    conf.get_args()
+    local_info = info.copy()
+    dataset_name = info['dataset']
+
+    results_folder = get_results_path(conf, local_info)
+    predictions_path = os.path.join(results_folder, 'predictions.csv')
+
+    if not os.path.exists(predictions_path):
+        print(f"No predictions found for {dataset_name} at {predictions_path}")
+        return
+
+    df = pd.read_csv(predictions_path)
+
+    # Prevent crash if WER column is somehow missing or empty
+    if sort_metric not in df.columns or df.empty:
+        return
+
+    worst_errors = df.sort_values(by=sort_metric, ascending=False).head(top_n)
+
+    print(f"🚀 Top {top_n} Worst Predictions (Sorted by '{sort_metric}' descending)\n" + "=" * 70)
+
+    for _, row in worst_errors.iterrows():
+        print(f"🔹 Index: {row['index']} | Duration: {row['duration']}s")
+        print(f"   Reference:  {row['reference']}")
+        print(f"   Prediction: {row['prediction']}")
+        if 'wer' in sort_metric:
+            print(f"   Metrics:    n_WER: {row['n_wer']:.2f} | WER: {row['wer']:.2f}")
+        elif 'cer' in sort_metric:
+            print(f"   Metrics:    n_CER: {row['n_cer']:.2f} | CER: {row['cer']:.2f}")
+
+        print(
+            f"   Breakdown:  Substitutions: {row['substitutions']} | Insertions: {row['insertions']} | Deletions: {row['deletions']}")
+        print("-" * 70)
+
+
+def plot_word_level_cross_attention(conf, info, cross_attentions, generated_ids, tokenizer, layer_idx=-1, sample_idx=0):
+    # 1. Max-pooling across attention heads to isolate dominant phonetic heads
+    layer_attn = cross_attentions[layer_idx, sample_idx].max(dim=0).values.numpy()
+    sample_ids = generated_ids[sample_idx].cpu().numpy()
+
+    # Filter out PAD tokens
+    pad_id = tokenizer.pad_token_id
+    valid_idx = [i for i, tok in enumerate(sample_ids) if tok != pad_id]
+
+    sample_ids = sample_ids[valid_idx]
+    layer_attn = layer_attn[valid_idx]
+
+    words = []
+    word_attentions = []
+
+    current_word_ids = []
+    current_attn = np.zeros(layer_attn.shape[1])
+
+    # 2. Group by subwords and decode safely
+    for token_id, attn in zip(sample_ids, layer_attn):
+        token_str = tokenizer.decode([token_id])
+        is_boundary = token_str.startswith(' ') or token_str in ['.', ',', '!', '?', ':', ';', '\n']
+
+        if is_boundary and current_word_ids:
+            word_str = tokenizer.decode(current_word_ids).strip()
+            if word_str:
+                words.append(word_str)
+                word_attentions.append(current_attn / (np.max(current_attn) + 1e-9))
+
+            current_word_ids = []
+            current_attn = np.zeros(layer_attn.shape[1])
+
+        current_word_ids.append(token_id)
+        current_attn += attn
+
+    if current_word_ids:
+        word_str = tokenizer.decode(current_word_ids).strip()
+        if word_str:
+            words.append(word_str)
+            word_attentions.append(current_attn / (np.max(current_attn) + 1e-9))
+
+    heatmap_data = np.vstack(word_attentions)
+
+    # 3. Crop Masked Time Steps (Padding removal)
+    col_sums = heatmap_data.sum(axis=0)
+    cum_sums = np.cumsum(col_sums)
+    total_mass = cum_sums[-1]
+
+    if total_mass > 0:
+        cutoff_idx = np.searchsorted(cum_sums, 0.995 * total_mass)
+        crop_idx = min(cutoff_idx + 3, heatmap_data.shape[1])
+        heatmap_data = heatmap_data[:, :crop_idx]
+
+    # Smooths discrete acoustic frame transitions (sigma=1.2 along frame axis)
+    heatmap_data = ndimage.gaussian_filter1d(heatmap_data, sigma=1.2, axis=1)
+    # Re-normalize row-wise for clear intensity
+    row_maxes = heatmap_data.max(axis=1, keepdims=True)
+    heatmap_data = np.where(row_maxes > 0, heatmap_data / row_maxes, 0)
+
+    # 5. Plot Continuous Heatmap using plt.imshow with Bilinear Interpolation
+    plt.figure(figsize=(12, 8))
+
+    im = plt.imshow(
+        heatmap_data,
+        aspect='auto',
+        cmap='viridis',
+        interpolation='bilinear',  # Creates smooth, continuous gradient transitions
+        origin='upper'
+    )
+
+    # Formatting Y-ticks to line up with continuous word rows
+    plt.yticks(range(len(words)), words, fontsize=12, rotation=0)
+    plt.xticks([])  # Hide frame indices for clean aesthetic
+
+    plt.xlabel("Audio Time Stream ➔", fontsize=12)
+
+    plt.tight_layout()
+
+    save_dir = get_plots_dir(conf, info)
+    save_path = os.path.join(save_dir, f"word_level_alignment_continuous_layer_{layer_idx}.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"Continuous alignment plot saved successfully to: {save_path}\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_type', type=str, default='dual_fusion')
     parser.add_argument('--datasets', nargs='+', type=str,
-                        default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'], help='datasets')
-    parser.add_argument('--train_datasets', nargs='+', type=str,
-                        default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'],
-                        help='datasets of the trained models')
-    parser.add_argument('--checkpoint_folder', type=str, default='dual_fusion_checkpoints')
-    parser.add_argument('--model_name', type=str, default=None)
-    parser.add_argument('--speech_encoder_id', type=str, default='openai/whisper-large-v3')
-    parser.add_argument('--language_model_id', type=str, default='ilsp/Llama-Krikri-8B-Instruct')
+                        default=['common_voice', 'fleurs', 'massive', 'voxpopuli', 'yodas'], help='datasets')
+    parser.add_argument('--splits', nargs='+', type=str, default=['train', 'validation', 'test'], help='split sets')
     parser.add_argument('--machine', type=str, default='kronos')
-    parser.add_argument('--datetime', type=str, default='')
+    parser.add_argument('--datetime', type=str, default=None)
     parser.add_argument('--turn', type=str, default=None)
+    parser.add_argument('--speech_encoder_id', type=str, default='openai/whisper-large-v3')
+    parser.add_argument('--language_model_id', type=str, default='elte-nlp/Racka-4B')
+    parser.add_argument('--model_type', type=str, default='dual_fusion_checkpoints')
+    parser.add_argument('--model_name', type=str, default=None)
+    parser.add_argument('--name', type=str, default='default', help='Name of the experiment')
 
     args, unknown = parser.parse_known_args()
+    args_dict = vars(args)
     DATASETS = args.datasets
 
-    base_info = {
-        'model_type': args.model_type,
-        'res_folder': None,
-        'train_dataset': args.train_datasets,
-        's_': False,
-        'checkpoint_folder': args.checkpoint_folder,
-        'model_name': args.model_name,
-        'speech_encoder_id': args.speech_encoder_id,
-        'language_model_id': args.language_model_id,
-        'bit4': True,
-        'machine': args.machine,
-        'datetime': args.datetime,
-        'turn': args.turn
-    }
+    if args.model_name is None:
+        model_name = (args.speech_encoder_id.split('/')[1] + '_' + args.language_model_id.split('/')[1])
 
-    if base_info['model_name'] is None:
-        base_info['model_name'] = (base_info['speech_encoder_id'].split('/')[1] + '_' +
-                                   base_info['language_model_id'].split('/')[1])
+    for split in args.splits:
+        base_info = {
+            'model_type': args.model_type,
+            'model_name': model_name,
+            'split': split,
+            'machine': args.machine,
+            'datetime': args.datetime,
+            'turn': args.turn,
+            'name': args.name
+        }
 
-    generate_semantic_drift_plot(base_info)
+        aggregate_results(base_info)
+
+        for dataset in args.datasets:
+            base_info['dataset'] = dataset
+            examine_worst_predictions(base_info, top_n=100, sort_metric='cer')
+            plot_wer_distribution(base_info)
+            plot_length_correlation(base_info)
+            plot_wer_vs_duration(base_info)
+
+        plot_sid_stacked_bar(base_info)

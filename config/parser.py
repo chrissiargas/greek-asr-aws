@@ -100,6 +100,7 @@ class Parser:
 
         self.datasets = args.main_args['datasets']
         self.split_type = args.main_args['split_type']
+        self.splitting = args.main_args['splitting']
         self.results_path = args.main_args['results_path']
         self.checkpoint_path = args.main_args['checkpoint_path']
 
@@ -108,6 +109,7 @@ class Parser:
 
         ## Data Configurations
         self.dual_fuse_args.randomize = args.dual_fuse_args['randomize']
+        self.dual_fuse_args.normalize = args.dual_fuse_args['normalize']
         self.dual_fuse_args.micro_data = args.dual_fuse_args['micro_data']
         self.dual_fuse_args.micro_size = args.dual_fuse_args['micro_size']
         self.dual_fuse_args.norm_mono = args.dual_fuse_args['norm_mono']
@@ -137,11 +139,14 @@ class Parser:
         self.dual_fuse_args.gated_cross_attention = args.dual_fuse_args['gated_cross_attention']
         self.dual_fuse_args.downsamplers = args.dual_fuse_args['downsamplers']
         self.dual_fuse_args.positional_info = args.dual_fuse_args['positional_info']
+        self.dual_fuse_args.layer_wise_fusion = args.dual_fuse_args['layer_wise_fusion']
+        self.dual_fuse_args.layer_weights_static = args.dual_fuse_args['layer_weights_static']
 
         ## LoRA Configurations
         self.dual_fuse_args.linguistic_lora = args.dual_fuse_args['linguistic_lora']
         self.dual_fuse_args.acoustic_lora = args.dual_fuse_args['acoustic_lora']
         self.dual_fuse_args.lora_params = args.dual_fuse_args['lora_params']
+        self.dual_fuse_args.lora_r = args.dual_fuse_args['lora_r']
         self.dual_fuse_args.two_stage = args.dual_fuse_args['two_stage']
         self.dual_fuse_args.lora_lr = args.dual_fuse_args['lora_lr']
         self.dual_fuse_args.proj_lr = args.dual_fuse_args['proj_lr']

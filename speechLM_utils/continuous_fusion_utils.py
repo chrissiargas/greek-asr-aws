@@ -1,7 +1,6 @@
 import os
 import sys
 from os.path import dirname
-
 sys.path.insert(0, dirname(dirname(os.path.abspath(__file__))))
 
 import torch
@@ -30,7 +29,6 @@ class SinusoidalPositionalEmbedding(nn.Module):
     def forward(self, x):
         seq_len = x.size(1)
         return x + self.pe[:, :seq_len, :]
-
 
 class CrossAttention(nn.Module):
     def __init__(self,
@@ -144,6 +142,20 @@ class CrossAttention(nn.Module):
 
     def forward(self, hidden_states, audio_features, prompt_audio=None, inj_audio_mask=None, prm_audio_mask=None):
         batch_size, text_len, _ = hidden_states.shape
+        audio_batch_size = audio_features.shape[0]
+
+        # FIX: Dynamically expand acoustic features during beam search generation
+        if audio_batch_size != batch_size:
+            num_beams = batch_size // audio_batch_size
+            audio_features = audio_features.repeat_interleave(num_beams, dim=0)
+
+            if prompt_audio is not None:
+                prompt_audio = prompt_audio.repeat_interleave(num_beams, dim=0)
+            if inj_audio_mask is not None:
+                inj_audio_mask = inj_audio_mask.repeat_interleave(num_beams, dim=0)
+            if prm_audio_mask is not None:
+                prm_audio_mask = prm_audio_mask.repeat_interleave(num_beams, dim=0)
+
         inj_audio_len = audio_features.shape[1]
         prm_len = hidden_states.shape[1]
 
@@ -170,8 +182,13 @@ class CrossAttention(nn.Module):
 
             key = key.view(batch_size, inj_audio_len, self.num_heads, self.head_dim).transpose(1, 2)
             value = value.view(batch_size, inj_audio_len, self.num_heads, self.head_dim).transpose(1, 2)
-            mask = self.compute_mask(prm_len, prm_audio_len, inj_audio_len, hidden_states.device, hidden_states.dtype,
-                                     prm_audio_mask, inj_audio_mask)
+
+            mask = self.compute_mask(prm_len, prm_audio_len,
+                                     inj_audio_len,
+                                     hidden_states.device,
+                                     hidden_states.dtype,
+                                     prm_audio_mask,
+                                     inj_audio_mask)
 
             # Save to memory
             self.cached_key = key
@@ -179,13 +196,15 @@ class CrossAttention(nn.Module):
             self.cached_mask = mask
 
         scores = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        mask = self.compute_mask(prm_len, prm_audio_len, inj_audio_len, scores.device, scores.dtype, prm_audio_mask,
-                                 inj_audio_mask)
 
         scores = scores + mask
 
         attentions = F.softmax(scores, dim=-1)
         attentions = self.dropout(attentions)
+
+        if getattr(self, "store_attention", False):
+            # Capture the attention matrix at this generation step
+            self.attention_map.append(attentions.detach().cpu())
 
         attn_output = torch.matmul(attentions, value)
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, text_len, self.hidden_dim)
@@ -197,7 +216,6 @@ class CrossAttention(nn.Module):
         fused_output = hidden_states + proj_audio_context
 
         return fused_output
-
 
 class InjectionLayer(nn.Module):
     def __init__(self, lm_layer, cross_attention_layer):
@@ -211,35 +229,26 @@ class InjectionLayer(nn.Module):
         self.prompt_audio = None
         self.prompt_audio_mask = None
 
-    def _expand_to_batch(self, attr_name, target_batch_size):
-        tensor = getattr(self, attr_name)
-        # Only expand if the sizes don't match
-        if tensor is not None and tensor.shape[0] != target_batch_size:
-            repeat_factor = target_batch_size // tensor.shape[0]
-            expanded_tensor = tensor.repeat_interleave(repeat_factor, dim=0)
-
-            # CACHE IT: Overwrite the class attribute so it never runs again for this batch
-            setattr(self, attr_name, expanded_tensor)
-            return expanded_tensor
-
-        return tensor
+    def __getattr__(self, name):
+        try:
+            # First, try to get the attribute normally (from InjectionLayer itself)
+            return super().__getattr__(name)
+        except AttributeError:
+            # If it's missing (like 'attention_type'), pass the request down to the wrapped LM_layer.
+            # PyTorch stores registered sub-modules in the _modules dictionary.
+            if 'LM_layer' in self._modules:
+                return getattr(self.LM_layer, name)
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def forward(self, hidden_states, *args, **kwargs):
         lm_outputs = self.LM_layer(hidden_states, *args, **kwargs)
         lm_hidden_states = lm_outputs[0]
 
-        target_batch_size = lm_hidden_states.shape[0]
-
-        injection_audio = self._expand_to_batch('injection_audio', target_batch_size)
-        injection_audio_mask = self._expand_to_batch('injection_audio_mask', target_batch_size)
-        prompt_audio = self._expand_to_batch('prompt_audio', target_batch_size)
-        prompt_audio_mask = self._expand_to_batch('prompt_audio_mask', target_batch_size)
-
         fused_hidden_states = self.cross_attention_layer(lm_hidden_states,
-                                                         injection_audio,
-                                                         prompt_audio,
-                                                         injection_audio_mask,
-                                                         prompt_audio_mask)
+                                                           self.injection_audio,
+                                                           self.prompt_audio,
+                                                           self.injection_audio_mask,
+                                                           self.prompt_audio_mask)
 
         rest = lm_outputs[1:] if len(lm_outputs) > 1 else ()
         if isinstance(rest, torch.Tensor):

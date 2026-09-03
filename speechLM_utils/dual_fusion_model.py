@@ -7,9 +7,11 @@ from pyarrow import duration
 
 sys.path.insert(0, dirname(dirname(abspath(__file__))))
 import warnings
+
 warnings.filterwarnings("ignore")
 
 from speechLM_utils.environment import set_environment
+
 set_environment()
 
 import numpy
@@ -29,6 +31,7 @@ from speechLM_utils.downsamplers import get_downsampler, CIFireAdapter
 from typing import Optional
 from transformers.modeling_outputs import ModelOutput
 from dataclasses import dataclass
+
 val_num_beams = 2
 stopping_criteria = None
 cer = CharErrorRate()
@@ -36,6 +39,7 @@ wer = WordErrorRate()
 access_token = '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'
 from speechLM_utils.data_collator import NUM_CLASSES, BLANK_IDX
 import torch.nn.functional as F
+
 
 def apply_text_dropout(batch_labels, batch_label_masks, tokenizer, dropout_prob=0.1, device=None):
     noisy_labels = batch_labels.clone()
@@ -54,6 +58,7 @@ def apply_text_dropout(batch_labels, batch_label_masks, tokenizer, dropout_prob=
     noisy_labels[mask_indices] = tokenizer.pad_token_id
 
     return noisy_labels
+
 
 def apply_audio_dropout(batch_audios, batch_labels, batch_label_masks, tokenizer, dropout_prob=0.05):
     batch_size = batch_audios.shape[0]
@@ -78,6 +83,48 @@ def apply_audio_dropout(batch_audios, batch_labels, batch_label_masks, tokenizer
 
     return noisy_audios, new_labels, new_masks
 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from transformers import LogitsProcessorList, RepetitionPenaltyLogitsProcessor
+
+
+class SafeRepetitionPenaltyLogitsProcessor(RepetitionPenaltyLogitsProcessor):
+    def __init__(self, penalty: float, skip_token_ids: list[int]):
+        super().__init__(penalty=penalty)
+        self.skip_token_ids = skip_token_ids
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        original_scores = scores[:, self.skip_token_ids].clone()
+        scores = super().__call__(input_ids, scores)
+        scores[:, self.skip_token_ids] = original_scores
+
+        return scores
+
+
+class LayerWiseAttention(nn.Module):
+    def __init__(self, num_layers: int, hidden_dim: int, bottleneck_dim: int = 256):
+        super().__init__()
+        self.num_layers = num_layers
+
+        self.attention_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, bottleneck_dim),
+            nn.Tanh(),
+            nn.Linear(bottleneck_dim, 1, bias=False)
+        )
+
+    def forward(self, stacked_states: torch.Tensor):
+        pooled_states = stacked_states.mean(dim=2)
+        energy_scores = self.attention_mlp(pooled_states)
+        alpha_weights = F.softmax(energy_scores, dim=0)
+        alpha_weights = alpha_weights.unsqueeze(2)
+        fused_state = (stacked_states * alpha_weights).sum(dim=0)
+
+        return fused_state
+
+
 @dataclass
 class DualFusionOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
@@ -86,6 +133,7 @@ class DualFusionOutput(ModelOutput):
     loss_ctc: Optional[torch.FloatTensor] = None
     loss_audio: Optional[torch.FloatTensor] = None
     loss_duration: Optional[torch.FloatTensor] = None
+
 
 class DualFusionModel(nn.Module):
     def __init__(self,
@@ -110,6 +158,8 @@ class DualFusionModel(nn.Module):
                  downsamplers,
                  causal_fusion,
                  positional_info,
+                 layer_wise_fusion,
+                 layer_weights_static,
                  predict_duration,
                  duration_resolution,
                  max_duration,
@@ -121,6 +171,7 @@ class DualFusionModel(nn.Module):
                  lng_lora,
                  acoustic_lora,
                  lora_params,
+                 lora_r,
                  prompt_persona,
                  prompt_instruction,
                  prompt_verbatim,
@@ -157,8 +208,11 @@ class DualFusionModel(nn.Module):
         self.pyramid_layers = pyramid_layers
         self.gated = gated
         self.positional_info = positional_info
+        self.layer_wise_fusion = layer_wise_fusion
+        self.layer_weights_static = layer_weights_static
 
         self.lng_lora = lng_lora
+        self.lora_r = lora_r
         self.acoustic_lora = acoustic_lora
         self.lora_params = lora_params
 
@@ -187,7 +241,10 @@ class DualFusionModel(nn.Module):
         else:
             bnb_config = None
 
-        lm_config = AutoConfig.from_pretrained(language_model_id)
+        lm_config = AutoConfig.from_pretrained(language_model_id,
+                                               token=access_token,
+                                               trust_remote_code=True)
+
         language_project_dim = lm_config.hidden_size
 
         self.processor = WhisperProcessor.from_pretrained(speech_encoder_model_id,
@@ -205,14 +262,32 @@ class DualFusionModel(nn.Module):
         self.audio_dim = int(self.speech_model.config.d_model)
         self.audio_len = 1500
 
+        self.num_whisper_layers = self.speech_model.config.encoder_layers + 1
+
         del self.speech_model
         gc.collect()
         torch.cuda.empty_cache()
 
+        if self.layer_wise_fusion:
+            if self.layer_weights_static:
+                self.layer_static = nn.Parameter(
+                    torch.zeros(self.n_injections, self.num_whisper_layers, device=self.device, dtype=self.dtype)
+                )
+            else:
+                self.layer_dynamic = nn.ModuleList()
+                for _ in range(self.n_injections):
+                    self.layer_dynamic.append(
+                        LayerWiseAttention(
+                            num_layers=self.num_whisper_layers,
+                            hidden_dim=self.audio_dim,
+                            bottleneck_dim=256
+                        ).to(self.device, dtype=self.dtype)
+                    )
+
         if self.acoustic_lora:
             peft_config = LoraConfig(
-                r=8,
-                lora_alpha=16,
+                r=lora_r,
+                lora_alpha=2 * lora_r,
                 target_modules=self.lora_params,
                 lora_dropout=0.1,
                 bias='none'
@@ -247,6 +322,12 @@ class DualFusionModel(nn.Module):
         if self.language_tokenizer.pad_token is None:
             self.language_tokenizer.pad_token = self.language_tokenizer.eos_token
 
+        self.pad_token_id = self.language_tokenizer.pad_token_id
+        self.eos_token_id = self.language_tokenizer.eos_token_id
+        self.bos_token_id = getattr(self.language_tokenizer, "bos_token_id", None)
+        self.skip_tokens = [t for t in [self.pad_token_id, self.eos_token_id, self.bos_token_id] if t is not None]
+        self.logits_processor = None
+
         if self.predict_duration:
             num_bins = int(self.max_duration / self.duration_resolution) + 1
 
@@ -269,8 +350,8 @@ class DualFusionModel(nn.Module):
             peft_config = LoraConfig(
                 task_type=TaskType.CAUSAL_LM,
                 inference_mode=False,
-                r=8,
-                lora_alpha=16,
+                r=lora_r,
+                lora_alpha=2 * lora_r,
                 lora_dropout=0.1,
                 target_modules=self.lora_params,
                 bias='none',
@@ -309,10 +390,10 @@ class DualFusionModel(nn.Module):
             for _ in self.injection_layer_ids:
                 if self.downsample_L > 1:
                     injection_downsampler, _ = get_downsampler(self.injection_downsample,
-                                                                self.downsample_L,
-                                                                self.audio_dim,
-                                                                self.device,
-                                                                self.dtype)
+                                                               self.downsample_L,
+                                                               self.audio_dim,
+                                                               self.device,
+                                                               self.dtype)
                 else:
                     injection_downsampler = None
 
@@ -389,10 +470,12 @@ class DualFusionModel(nn.Module):
             return self.language_model.model.layers[layer_id]
 
     def get_named_params(self):
+
         lora_params = []
         down_params = []
         adapter_params = []
         cross_attn_params = []
+        layer_weights_params = []
         ctc_params = []
         audio_params = []
         duration_params = []
@@ -402,6 +485,7 @@ class DualFusionModel(nn.Module):
             is_lora = "lora" in name
             is_down = ("input_downsampler" in name or "injection_downsampler" in name or 'injection_downsamplers' in name)
             is_cross_attn = "cross_attention_layer" in name
+            is_layer_weights = "layer_static" in name or "layer_dynamic" in name
             is_adapter = "adapter" in name
             is_ctc_head = "ctc_predictor" in name
             is_audio_head = "audio_predictor" in name
@@ -417,6 +501,8 @@ class DualFusionModel(nn.Module):
                 adapter_params.append(param)
             elif is_cross_attn:
                 cross_attn_params.append(param)
+            if is_layer_weights:
+                layer_weights_params.append(param)
             elif is_ctc_head:
                 ctc_params.append(param)
             elif is_audio_head:
@@ -430,12 +516,29 @@ class DualFusionModel(nn.Module):
                 'downsamplers': down_params,
                 'adapter': adapter_params,
                 'cross_attn': cross_attn_params,
+                'layer_weights': layer_weights_params,
                 'ctc_head': ctc_params,
                 'audio_head': audio_params,
                 'duration_token_params': duration_params,
                 'core': core_params}
 
     def get_gradient(self):
+        import bitsandbytes as bnb
+
+        def build_true_param_counts(model):
+            """Map id(param) -> true unpacked element count for every quantized Linear4bit weight."""
+            true_counts = {}
+            for module in model.modules():
+                if isinstance(module, bnb.nn.Linear4bit):
+                    true_counts[id(module.weight)] = module.in_features * module.out_features
+                    # module.bias (if present) is NOT quantized — its .numel() is already correct
+            return true_counts
+
+        def numel_true(param, true_counts):
+            return true_counts.get(id(param), param.numel())
+
+        true_counts = build_true_param_counts(self)
+
         trainable_params = 0
         all_params = 0
 
@@ -445,6 +548,7 @@ class DualFusionModel(nn.Module):
         injection_down_params = 0
         adapter_params = 0
         cross_attn_params = 0
+        layer_weight_params = 0
         frozen_whisper_params = 0
         frozen_llm_params = 0
         ctc_params = 0
@@ -453,11 +557,13 @@ class DualFusionModel(nn.Module):
 
         print("\n---MODEL PARAMETERS---")
         for name, param in self.named_parameters():
-            all_params += param.numel()
+            all_params += numel_true(param, true_counts)
 
             is_llm_lora = ("lora" in name and "language_model" in name)
-            is_whisper_lora = ("lora" in name and ("speech_model" in name or "speech_encoder" in name or "speech_decoder" in name))
+            is_whisper_lora = ("lora" in name and (
+                    "speech_model" in name or "speech_encoder" in name or "speech_decoder" in name))
             is_cross_attn = "cross_attention_layer" in name
+            is_layer_weights = "layer_static" in name or "layer_dynamic" in name
             is_input_down = "input_downsampler" in name
             is_injection_down = ("injection_downsampler" in name or 'injection_downsamplers' in name)
             is_adapter = "adapter" in name
@@ -468,21 +574,22 @@ class DualFusionModel(nn.Module):
             is_audio_head = "audio_predictor" in name
 
             if param.requires_grad:
-                trainable_params += param.numel()
-                if is_llm_lora: llm_lora_params += param.numel()
-                if is_whisper_lora: whisper_lora_params += param.numel()
-                if is_cross_attn: cross_attn_params += param.numel()
-                if is_input_down: input_down_params += param.numel()
-                if is_injection_down: injection_down_params += param.numel()
-                if is_adapter: adapter_params += param.numel()
-                if is_ctc_head: ctc_params += param.numel()
-                if is_duration_token_parameters: duration_params += param.numel()
-                if is_audio_head: audio_params += param.numel()
+                trainable_params += numel_true(param, true_counts)
+                if is_llm_lora: llm_lora_params += numel_true(param, true_counts)
+                if is_whisper_lora: whisper_lora_params += numel_true(param, true_counts)
+                if is_cross_attn: cross_attn_params += numel_true(param, true_counts)
+                if is_layer_weights: layer_weight_params += numel_true(param, true_counts)
+                if is_input_down: input_down_params += numel_true(param, true_counts)
+                if is_injection_down: injection_down_params += numel_true(param, true_counts)
+                if is_adapter: adapter_params += numel_true(param, true_counts)
+                if is_ctc_head: ctc_params += numel_true(param, true_counts)
+                if is_duration_token_parameters: duration_params += numel_true(param, true_counts)
+                if is_audio_head: audio_params += numel_true(param, true_counts)
             else:
-                if is_whisper: frozen_whisper_params += param.numel()
-                if is_llm: frozen_llm_params += param.numel()
-                if is_input_down: input_down_params += param.numel()
-                if is_adapter: adapter_params += param.numel()
+                if is_whisper: frozen_whisper_params += numel_true(param, true_counts)
+                if is_llm: frozen_llm_params += numel_true(param, true_counts)
+                if is_input_down: input_down_params += numel_true(param, true_counts)
+                if is_adapter: adapter_params += numel_true(param, true_counts)
 
         adapter_trainable = 'Frozen' if self.static_projector else 'Trainable'
         injection_trainable = 'Frozen' if self.static_injection else 'Trainable'
@@ -497,6 +604,7 @@ class DualFusionModel(nn.Module):
         print(f" > Adapter Params ({adapter_trainable}): {adapter_params:,}")
         print(f" > Injection Downsampler Params ({injection_trainable}): {injection_down_params:,}")
         print(f" > Cross Attention Params ({injection_trainable}): {cross_attn_params:,}")
+        print(f" > Layer Weights Params ({injection_trainable}): {layer_weight_params:,}")
         print(f" > CTC Head Params (Trainable): {ctc_params:,}")
         print(f" > Audio Head Params (Trainable): {audio_params:,}")
         print(f" > Duration Token Params (Trainable): {duration_params:,}")
@@ -507,6 +615,7 @@ class DualFusionModel(nn.Module):
         print("\n--- Module Parameters ---")
         encoder_params = 0
         cross_attn_params = 0
+        layer_weight_params = 0
         input_down_params = 0
         injection_down_params = 0
         adapter_params = 0
@@ -516,48 +625,57 @@ class DualFusionModel(nn.Module):
         duration_params = 0
 
         for param in self.speech_encoder.parameters():
-            encoder_params += param.numel()
+            encoder_params += numel_true(param, true_counts)
 
         for injection_layer in self.injection_layers:
             for param in injection_layer.cross_attention_layer.parameters():
-                cross_attn_params += param.numel()
+                cross_attn_params += numel_true(param, true_counts)
+
+        if self.layer_wise_fusion:
+            if self.layer_weights_static:
+                layer_weight_params += numel_true(self.layer_static, true_counts)
+            else:
+                for ld in self.layer_dynamic:
+                    for param in ld.parameters():
+                        layer_weight_params += numel_true(param, true_counts)
 
         if self.include_adapter:
             for param in self.input_downsampler.parameters():
-                input_down_params += param.numel()
+                input_down_params += numel_true(param, true_counts)
 
         if self.downsamplers == 'injection_common' and self.downsample_L > 1:
             for param in self.injection_downsampler.parameters():
-                injection_down_params += param.numel()
+                injection_down_params += numel_true(param, true_counts)
 
         elif self.downsamplers == 'different' and self.downsample_L > 1:
             for injection_downsampler in self.injection_downsamplers:
                 for param in injection_downsampler.parameters():
-                    injection_down_params += param.numel()
+                    injection_down_params += numel_true(param, true_counts)
 
         if self.include_adapter:
             for param in self.adapter.parameters():
-                adapter_params += param.numel()
+                adapter_params += numel_true(param, true_counts)
 
         if self.ctc:
             for param in self.ctc_predictor.parameters():
-                ctc_params += param.numel()
+                ctc_params += numel_true(param, true_counts)
 
         if self.audio_forecasting:
             for param in self.audio_predictor.parameters():
-                audio_params += param.numel()
+                audio_params += numel_true(param, true_counts)
 
         if self.predict_duration:
             for param in self.duration_predictor.parameters():
-                duration_params += param.numel()
+                duration_params += numel_true(param, true_counts)
 
         for param in self.language_model.parameters():
-            llm_params += param.numel()
+            llm_params += numel_true(param, true_counts)
 
         print(f"Input Downsampler Params: {input_down_params:,}")
         print(f"Adapter Params: {adapter_params:,}")
         print(f"Injection Downsampler Params: {injection_down_params:,}")
         print(f"Cross-Attention Params: {cross_attn_params:,}")
+        print(f"Layer Weight Params: {layer_weight_params:,}")
         print(f"CTC Head Params: {ctc_params:,}")
         print(f"Audio Head Params: {audio_params:,}")
         print(f"Duration Params: {duration_params:,}")
@@ -605,9 +723,9 @@ class DualFusionModel(nn.Module):
         self.embed_bank["att2"] = a2
 
     def _prepare_input_embeds(
-            self, batch_size, audio_embeds = None, audio_masks = None,
-            label_ids= None, label_masks = None, noisy_label_ids = None,
-            tag_tokens = None, tag_masks = None
+            self, batch_size, audio_embeds=None, audio_masks=None,
+            label_ids=None, label_masks=None, noisy_label_ids=None,
+            tag_tokens=None, tag_masks=None
     ):
         target_dtype = self.embed_bank["embed1"].dtype
 
@@ -713,6 +831,10 @@ class DualFusionModel(nn.Module):
         if self.n_injections == 0:
             return injection_audios, injection_masks
 
+        stacked_hidden_states = None
+        if self.layer_wise_fusion:
+            stacked_hidden_states = torch.stack(encoder_outputs.hidden_states, dim=0)
+
         if not self.pyramid_layers:
             if self.downsample_L == 1:
                 inj_audio_mask = self.calculate_mask(audio_masks, audio_embs)
@@ -728,17 +850,21 @@ class DualFusionModel(nn.Module):
                     inj_audio_mask = self.calculate_mask(audio_masks, injection_audio)
 
         for l, injection_layer in enumerate(self.injection_layers):
-            if self.pyramid_layers:
-                if l == self.n_injections - 1:
-                    audio_features = encoder_outputs.last_hidden_state
+            if self.layer_wise_fusion:
+                if self.layer_weights_static:
+                    layer_alpha = F.softmax(self.layer_static[l], dim=0).view(-1, 1, 1, 1)
+                    audio_features = (stacked_hidden_states * layer_alpha).sum(dim=0)
                 else:
-                    audio_features = encoder_outputs.hidden_states[injection_layer]
+                    audio_features = self.layer_dynamic[l](stacked_hidden_states)
 
                 if self.downsample_L > 1:
-                    if isinstance(self.injection_downsamplers[l], CIFireAdapter):
-                        injection_audio, inj_audio_mask, _ = self.injection_downsamplers[l](audio_features, audio_masks)
+                    ds = self.injection_downsamplers[
+                        l] if self.downsamplers == 'different' else self.injection_downsampler
+
+                    if isinstance(ds, CIFireAdapter):
+                        injection_audio, inj_audio_mask, _ = ds(audio_features, audio_masks)
                     else:
-                        injection_audio = self.injection_downsamplers[l](audio_features)
+                        injection_audio = ds(audio_features)
                         inj_audio_mask = self.calculate_mask(audio_masks, injection_audio)
                 else:
                     inj_audio_mask = self.calculate_mask(audio_masks, audio_features)
@@ -795,12 +921,9 @@ class DualFusionModel(nn.Module):
         return duration_loss
 
     def forward(self, audios, audio_masks,
-                audio_lb_tokens = None,
-                labels = None,
-                label_lengths = None,
-                label_masks = None,
-                duration_ids = None,
-                index=None,
+                labels=None,
+                label_masks=None,
+                duration_ids=None,
                 ctc_labels=None,
                 ctc_lengths=None,
                 tag_tokens=None,
@@ -842,13 +965,13 @@ class DualFusionModel(nn.Module):
                     aux_ctc_loss = self.ctc_calculate(proj_embeddings, down_masks, ctc_labels, ctc_lengths)
 
         prompt_embed, prompt_mask, label_length, true_labels = self._prepare_input_embeds(batch_size,
-                                                                                        proj_embeddings,
-                                                                                        down_masks,
-                                                                                        labels,
-                                                                                        label_masks,
-                                                                                        noisy_label_ids,
-                                                                                        tag_tokens,
-                                                                                        tag_masks)
+                                                                                          proj_embeddings,
+                                                                                          down_masks,
+                                                                                          labels,
+                                                                                          label_masks,
+                                                                                          noisy_label_ids,
+                                                                                          tag_tokens,
+                                                                                          tag_masks)
 
         with self.with_injection_gradient:
             injection_audios, injection_masks = self.inject(encoder_outputs,
@@ -927,6 +1050,8 @@ class DualFusionModel(nn.Module):
                  tag_masks=None,
                  **kwargs):
 
+        return_attention = kwargs.pop("return_attention", False)
+
         with torch.inference_mode():
             inputs = audios
             batch_size = inputs.shape[0]
@@ -969,12 +1094,11 @@ class DualFusionModel(nn.Module):
                                                                          tag_tokens=tag_tokens,
                                                                          tag_masks=tag_masks)
 
-            pad_token_id = self.language_tokenizer.pad_token_id
             input_ids = torch.ones(
                 (prompt_embed.shape[0], prompt_embed.shape[1]),
                 dtype=torch.long,
                 device=self.device
-            ) * pad_token_id
+            ) * self.pad_token_id
 
             injection_audios, injection_masks = self.inject(encoder_outputs,
                                                             audio_embeddings,
@@ -988,25 +1112,170 @@ class DualFusionModel(nn.Module):
                 injection_layer.prompt_audio = proj_embeddings
                 injection_layer.prompt_audio_mask = down_masks
 
+            rep_penalty = kwargs.pop("rep_penalty", 1.0)
+            if rep_penalty > 1.0 and self.logit_processor is None:
+                safe_rep_processor = SafeRepetitionPenaltyLogitsProcessor(
+                    penalty=rep_penalty,
+                    skip_token_ids=skip_tokens
+                )
+                self.logits_processor.append(safe_rep_processor)
+
+            if return_attention:
+                for injection_layer in self.injection_layers:
+                    injection_layer.cross_attention_layer.store_attention = True
+                    injection_layer.cross_attention_layer.attention_map = []
+
             try:
                 outputs = self.language_model.generate(
                     input_ids=input_ids,
                     inputs_embeds=prompt_embed,
                     attention_mask=prompt_mask.bool(),
-                    pad_token_id=pad_token_id,
+                    pad_token_id=self.pad_token_id,
+                    logits_processor=self.logits_processor,
                     **kwargs
                 )
+
+                cross_attentions = None
+                if return_attention:
+                    layer_attentions = []
+                    for injection_layer in self.injection_layers:
+                        layer_attn = torch.cat(injection_layer.cross_attention_layer.attention_map, dim=2)
+                        layer_attentions.append(layer_attn)
+
+                    cross_attentions = torch.stack(layer_attentions)
 
             finally:
                 for injection_layer in self.injection_layers:
                     injection_layer.cross_attention_layer.clear_cache()
+                    injection_layer.cross_attention_layer.store_attention = False
+                    injection_layer.cross_attention_layer.injection_audio = None
                     injection_layer.injection_audio = None
                     injection_layer.injection_audio_mask = None
                     injection_layer.prompt_audio = None
                     injection_layer.prompt_audio_mask = None
+
+            if return_attention:
+                return outputs, cross_attentions
 
             return outputs
 
     @property
     def config(self):
         return self.language_model.config
+
+
+def main():
+    from transformers import GenerationConfig
+
+    # This shows the absolute defaults defined by Hugging Face
+    default_config = GenerationConfig()
+    print(f"Library default max_new_tokens: {default_config.max_new_tokens}")
+    print(f"Library default max_length: {default_config.max_length}")
+
+    print("Initializing DualFusionModel for token verification...")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    model = DualFusionModel(
+        speech_encoder_model_id="openai/whisper-large-v3",
+        language_model_id="elte-nlp/Racka-4B",
+        blank_training=False,
+        audio_dropout=0.1,
+        text_perturbation=True,
+        text_dropout=0.1,
+        spec_augment=True,
+        include_adapter=True,
+        input_downsample='reshape',
+        static_projector=False,
+        downsample_K=5,
+        hidden_dim=2048,
+        static_injection=False,
+        injection_layers=[15, 25, 35],
+        pyramid_layers=False,
+        gated=False,
+        downsample_L=5,
+        injection_downsample='conv1d',
+        downsamplers='injection_common',
+        causal_fusion=False,
+        positional_info=False,
+        layer_wise_fusion=False,
+        layer_weights_static=False,
+        predict_duration=False,
+        duration_resolution=0.1,
+        max_duration=30.0,
+        ctc=False,
+        audio_forecasting=False,
+        ctc_weight=0.4,
+        duration_weight=0.4,
+        audio_weight=0.4,
+        lng_lora=True,
+        acoustic_lora=False,
+        lora_params=["q_proj", "k_proj", "v_proj", "o_proj"],
+        prompt_persona="none",
+        prompt_instruction="Kizárólag a hanganyag szöveges átiratát add vissza. Semmilyen más karaktert, fejlécet vagy jelet ne használj.\n\nÁtirat:",
+        prompt_verbatim=True,
+        dtype=dtype,
+        bit4=True,  # Ensure bitsandbytes is installed if running locally
+        attn_implementation="sdpa",
+        device=device,
+        exp=0
+    )
+
+    tokenizer = model.language_tokenizer
+
+    print("\n" + "=" * 50)
+    print(" TOKENIZER VERIFICATION ")
+    print("=" * 50)
+    print(f"Language Model: elte-nlp/Racka-4B")
+    print("-" * 50)
+    print(f"EOS Token:  {tokenizer.eos_token} \t| ID: {tokenizer.eos_token_id}")
+    print(f"PAD Token:  {tokenizer.pad_token} \t| ID: {tokenizer.pad_token_id}")
+
+    bos_token = getattr(tokenizer, "bos_token", "Not Defined")
+    bos_token_id = getattr(tokenizer, "bos_token_id", "Not Defined")
+    print(f"BOS Token:  {bos_token} \t| ID: {bos_token_id}")
+    print("=" * 50 + "\n")
+
+    # If that shows 'Not set', check the generation config object directly:
+    print(f"DEBUG: Generation config max tokens")
+    print(model.language_model.generation_config)
+
+    # --- SETUP SIMULATION ---
+    vocab_size = 151645
+    eos_token_id = 151643
+    word_token_id = 1050  # Let's pretend this is the token for the word "demokrácia"
+
+    # Simulate that the model has already generated both the word and the EOS token in the past
+    input_ids = torch.tensor([[word_token_id, eos_token_id, word_token_id]])
+
+    # Simulate the raw output logits from the LLM (before any penalties)
+    # We set all logits to exactly 10.0 so the math is easy to see.
+    raw_scores = torch.ones(1, vocab_size) * 10.0
+
+    print(f"--- RAW UNPENALIZED SCORES ---")
+    print(f"Word Token Score: {raw_scores[0, word_token_id]:.4f}")
+    print(f"EOS Token Score:  {raw_scores[0, eos_token_id]:.4f}\n")
+
+    # --- TEST 1: STANDARD HUGGING FACE PENALTY ---
+    # With a penalty of 1.2, scores > 0 are divided by 1.2 (10.0 / 1.2 = 8.333)
+    standard_processor = RepetitionPenaltyLogitsProcessor(penalty=1.2)
+
+    # Note: processors modify tensors in place, so we clone raw_scores
+    standard_penalized_scores = standard_processor(input_ids, raw_scores.clone())
+
+    print(f"--- STANDARD PROCESSOR (penalty=1.2) ---")
+    print(f"Word Token Score: {standard_penalized_scores[0, word_token_id]:.4f} (Penalized!)")
+    print(f"EOS Token Score:  {standard_penalized_scores[0, eos_token_id]:.4f} (Penalized! Model avoids stopping.)\n")
+
+    # --- TEST 2: SAFE PROCESSOR ---
+    safe_processor = SafeRepetitionPenaltyLogitsProcessor(penalty=1.2, skip_token_ids=[eos_token_id])
+    safe_penalized_scores = safe_processor(input_ids, raw_scores.clone())
+
+    print(f"--- SAFE PROCESSOR (penalty=1.2, skip=[{eos_token_id}]) ---")
+    print(f"Word Token Score: {safe_penalized_scores[0, word_token_id]:.4f} (Penalized! Stops looping words.)")
+    print(f"EOS Token Score:  {safe_penalized_scores[0, eos_token_id]:.4f} (PROTECTED! Model can stop safely.)\n")
+
+
+if __name__ == "__main__":
+    main()

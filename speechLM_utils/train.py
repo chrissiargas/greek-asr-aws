@@ -13,6 +13,7 @@ from speechLM_utils.environment import set_environment
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 set_environment()
+
 import gc
 from preprocessing.prepare import make_data_module
 from speechLM_utils.data_collator import DataCollator, compute_length
@@ -28,6 +29,7 @@ from speechLM_utils.checkpoint import *
 from speechLM_utils.metrics import wrap_compute_metrics
 from speechLM_utils.utils import init_gpu, init_info, init, init_wandb
 from distutils.util import strtobool
+import json
 
 # Load metrics once
 cer_metric = evaluate.load("cer")
@@ -93,7 +95,7 @@ def two_stage_train(dataset, args, training_args, info, checkpoint_path, checkpo
 
 def train_model(dataset, args, training_args, info, checkpoint_path, checkpoint_dir, writer, device, load: bool = False,
                 exp: int = 0):
-    model, tokenizer = get_model(MODEL_TYPE, args, info, device, exp, ATTN_IMPL)
+    model, tokenizer = get_model(args, info, device, exp, ATTN_IMPL)
 
     if load:
         model, max_step = load_weights(model, checkpoint_path, args, device)
@@ -120,9 +122,10 @@ def train_model(dataset, args, training_args, info, checkpoint_path, checkpoint_
         {"params": params['cross_attn'], "lr": args.proj_lr},
         {"params": params['ctc_head'], "lr": args.proj_lr},
         {"params": params['audio_head'], "lr": args.proj_lr},
-        {"params": params['duration_token_params'], "lr": args.proj_lr}
+        {"params": params['duration_token_params'], "lr": args.proj_lr},
+        {"params": params['layer_weights'], "lr": args.proj_lr}
     ] if len(group["params"]) > 0
-                                    ]
+    ]
 
     optimizer = torch.optim.AdamW(
         optimizer_grouped_parameters,
@@ -163,11 +166,23 @@ def train_model(dataset, args, training_args, info, checkpoint_path, checkpoint_
 
     return checkpoint_path
 
+def get_bad_folder_path(conf):
+    bad_folder_path = os.path.join(os.path.expanduser('~'),
+                                   conf.dataset_path,
+                                   conf.language,
+                                   'bad_folder')
 
-def setup(model_type, info, restart: bool = False, device: str = 'cuda', local_rank: int = -1, exp: int = 0):
-    conf, args, training_args, bad_folder, date, checkpoint_path, checkpoint_dir, writer = init(model_type, info,
-                                                                                                restart, exp)
-    print(args)
+    return bad_folder_path
+
+def setup(info, restart: bool = False, device: str = 'cuda', local_rank: int = -1, exp: int = 0):
+    conf, args, training_args, date, checkpoint_path, checkpoint_dir, writer = init(info, restart, exp)
+
+    bad_folder = get_bad_folder_path(conf)
+
+    print('='*60)
+    print('Experiment Arguments')
+    print(json.dumps(args.__dict__, indent=4, default=str))
+    print('=' * 60)
 
     dataset = make_data_module(DATASETS,
                                bad_folder,
@@ -178,10 +193,10 @@ def setup(model_type, info, restart: bool = False, device: str = 'cuda', local_r
                                do_interleave=info['interleave'],
                                temperature=args.interleave_temperature,
                                randomize=args.randomize,
-                               norm_mono=args.norm_mono,
+                               normalize_type=args.normalize,
                                exp=exp)
 
-    init_wandb(local_rank, args, date, MODEL_TYPE, DATASETS, NOTE)
+    init_wandb(local_rank, args, info, date, info['model_name'], DATASETS, exp)
 
     if args.two_stage:
         two_stage_train(dataset, args, training_args, info, checkpoint_path, checkpoint_dir, writer, device, exp=exp)
@@ -192,10 +207,10 @@ def setup(model_type, info, restart: bool = False, device: str = 'cuda', local_r
 def train(exp: int = 0):
     local_rank, device = init_gpu()
 
-    info = init_info(MODEL_TYPE, DATASETS, MACHINE, DATETIME, INTERLEAVE, ITERS)
+    info = init_info(SPEECH_ENCODER_ID, LANGUAGE_MODEL_ID, DATASETS, MACHINE, DATETIME, INTERLEAVE, ITERS)
 
     try:
-        setup(MODEL_TYPE, info, restart=RESTART, device=device, local_rank=local_rank, exp=exp)
+        setup(info, restart=RESTART, device=device, local_rank=local_rank, exp=exp)
 
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -207,10 +222,6 @@ def train(exp: int = 0):
         gc.collect()
         torch.cuda.empty_cache()
 
-
-MODEL_TYPE = 'dual_fusion'
-FILTERS = ['duration', 'ratio']
-
 import argparse
 
 if __name__ == "__main__":
@@ -220,29 +231,36 @@ if __name__ == "__main__":
     parser.add_argument('--datasets', nargs='+', type=str,
                         default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'], help='datasets')
     parser.add_argument('--iters', type=int, default=800, help='validation samples per dataset')
-    parser.add_argument('--note', type=str, default='', help='note about this experiment')
     parser.add_argument('--restart', default=True, help='Restart from the beginning', type=lambda x: bool(strtobool(x)))
     parser.add_argument('--machine', type=str, default=None, help='machine name of model to load')
     parser.add_argument('--datetime', type=str, default=None, help='datetime of model to load')
     parser.add_argument('--skip_stage1', default=False, help='skip stage 1 training', type=lambda x: bool(strtobool(x)))
     parser.add_argument('--interleave', default=True, help='interleave data', type=lambda x: bool(strtobool(x)))
     parser.add_argument('--attn_implementation', type=str, default='sdpa', help='attention implementation type')
+    parser.add_argument('--speech_encoder_id', type=str, default='openai/whisper-large-v3', help='speech encoder id')
+    parser.add_argument('--language_model_id', type=str, default='elte-nlp/Racka-4B', help='language model id')
+    parser.add_argument('--filters', type=str, nargs='+', default=['duration', 'length', 'text'])
 
     args, unknown = parser.parse_known_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
+    SPEECH_ENCODER_ID = args.speech_encoder_id
+    LANGUAGE_MODEL_ID = args.language_model_id
     DATASETS = args.datasets
     ITERS = args.iters
-    NOTE = args.note
     RESTART = args.restart
     MACHINE = args.machine
     DATETIME = args.datetime
     INTERLEAVE = args.interleave
     SKIP_STAGE1 = args.skip_stage1
     ATTN_IMPL = args.attn_implementation
+    FILTERS = args.filters
 
     print('EXPERIMENT SETUP: ')
+    print('speech encoder id: ', SPEECH_ENCODER_ID)
+    print('language model id: ', LANGUAGE_MODEL_ID)
     print('datasets: ', DATASETS)
+    print('filters: ', FILTERS)
     print('iters: ', ITERS)
     print('restart: ', RESTART)
     print('machine: ', MACHINE)

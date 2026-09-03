@@ -13,6 +13,7 @@ main_args:
     - css10
     - hparl
   split_type: 'default'
+  splitting: false
   results_path: "cache/results"
   checkpoint_path: "cache/checkpoints"
 
@@ -20,14 +21,15 @@ dual_fuse_args:
   checkpoint_path: "cache/checkpoints"
    ## Data Configurations
   interleave_temperature: 1.2
+  normalize: default
   micro_data: False
-  micro_size: 800
+  micro_size: 100
   randomize: True
   norm_mono: False
   ## Regularization & Augmentation Configurations
   blank_training: False
   audio_dropout: 0.1
-  text_perturbation: False
+  text_perturbation: True
   text_dropout: 0.1
   spec_augment: True
   ## Input Injection Configurations
@@ -38,18 +40,21 @@ dual_fuse_args:
   input_downsample: 'reshape'
   ## Cross-Attention Injection Configurations
   static_injection_layers: False
-  downsample_L: 5
+  downsample_L: 3
   injection_downsample: 'conv1d'
   injection_layers: [10, 20, 30]
   pyramid_layers: False
   downsamplers: 'injection_common' # common, injection_common, different
   causal_fusion: False
-  gated_cross_attention: False
+  gated_cross_attention: True
   positional_info: False
+  layer_wise_fusion: True
+  layer_weights_static: False
   ## LoRA Configurations
   linguistic_lora: True
   acoustic_lora: False
-  lora_params: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  lora_r: 64
+  lora_params: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   proj_lr: 0.0001
   lora_lr: 0.0001
   two_stage: False
@@ -64,35 +69,37 @@ dual_fuse_args:
   audio_weight: 0.4
   ## Training Behavior Configurations
   early_stopping_patience: 15
-  first_stage_epochs: 20
+  first_stage_epochs: 5
   second_stage_epochs: 20
   ## Prompt Configurations
   prompt_persona: none
   prompt_instruction: "\nΜετάγραψε το προηγούμενο ηχητικό απόσπασμα σε ελληνικό κείμενο με απόλυτη ακρίβεια."
-  prompt_verbatim: False
+  prompt_verbatim: True
   training_args: {
     # --- PERFORMANCE OPTIMIZATIONS ---
     'bf16': True,                   # CRITICAL: Native speed for Titan RTX
     'dataloader_num_workers': 4,    # Optimized for 14-core CPU (3 workers * 4 GPUs = 12 threads)
     'dataloader_pin_memory': True,  # Fast CPU->GPU transfer
-    'per_device_train_batch_size': 2, # Maximize VRAM usage
+    'per_device_train_batch_size': 4, # Maximize VRAM usage
     'gradient_accumulation_steps': 4,  # Effective Batch = 8 * 4 * 2 = 96
     'gradient_checkpointing': True,
     'gradient_checkpointing_kwargs': {'use_reentrant': False},
     'ddp_find_unused_parameters': True,
 
     # --- TRAINING BEHAVIOR ---
-    'warmup_steps': 400,
-    'lr_scheduler_type': 'linear',
+    'max_steps': 45000,
+    'warmup_steps': 500,
+    'lr_scheduler_type': 'cosine',
+    'weight_decay': 0.01,
     'optim': 'adamw_torch',
 
     # --- LOGGING & SAVING ---
     'report_to': 'wandb',
-    'logging_steps': 10,
+    'logging_steps': 50,
     'save_strategy': 'steps',
-    'save_steps': 1000,
+    'save_steps': 500,
     'eval_strategy': 'steps',
-    'eval_steps': 1000,
+    'eval_steps': 500,
     'save_total_limit': 3,
     'eval_accumulation_steps': 2,
     'per_device_eval_batch_size': 4,
@@ -103,17 +110,18 @@ dual_fuse_args:
     'group_by_length': False,       # Prevent crash (missing input_ids)
     'predict_with_generate': True,  # REQUIRED to calculate WER/CER during eval
     'do_train': True,
+    'save_safetensors': False,
 
     # --- EARLY STOPPING SETTINGS ---
     'load_best_model_at_end': True,
     'metric_for_best_model': 'eval_wer',
     'greater_is_better': False,
-    'generation_max_length': 410,
+    'generation_max_length': 420,
 
     'generation_config': {
       'num_beams': 1,
       'do_sample': False,
-      'max_new_tokens': 410,
+      'max_new_tokens': 420,
       'use_cache': True,
     }
   }

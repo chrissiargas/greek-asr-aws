@@ -2,6 +2,8 @@ import json
 import os
 from typing import Dict, Optional
 from datasets import Dataset, Audio, interleave_datasets, concatenate_datasets, DatasetDict
+from torch.fx.operator_schemas import normalize_function
+
 from preprocessing.split import splitter
 import random
 from preprocessing.normalize import normalize
@@ -17,10 +19,10 @@ def make_data_module(dataset_names,
                      eval_samples: Optional[int] = None,
                      do_interleave: bool = True,
                      temperature: float = 1.0,
-                     norm_mono: bool = False,
                      randomize: bool = False,
                      seed: int = 42,
-                     exp: int = 0):
+                     exp: int = 0,
+                     normalize_type: str = 'default'):
 
     split = splitter(exp=exp)
     data = split.split(datasets=dataset_names)
@@ -32,8 +34,8 @@ def make_data_module(dataset_names,
                           iters=train_samples if micro_data else None,
                           randomize=randomize,
                           has_duration=True,
-                          norm_mono=norm_mono,
-                          seed=seed)
+                          seed=seed,
+                          normalize_type=normalize_type)
 
     val_sets = get_data(data['validation'],
                         bad_folder,
@@ -42,8 +44,8 @@ def make_data_module(dataset_names,
                         iters=eval_samples,
                         randomize=randomize,
                         has_duration=True,
-                        norm_mono=norm_mono,
-                        seed=seed)
+                        seed=seed,
+                        normalize_type=normalize_type)
 
     if do_interleave and len(train_sets) > 1:
         train = interleave(train_sets, temperature=temperature)
@@ -64,10 +66,14 @@ def make_data_module(dataset_names,
 
     return dataset
 
-def get_typed_data(dataset, audio_name: str,
-                   text_name: str, has_duration: bool = False,
-                   randomize: bool = False, seed: int = 42,
-                   normalized: bool = True, norm_mono: bool = False):
+def get_typed_data(dataset,
+                   audio_name: str,
+                   text_name: str,
+                   has_duration: bool = False,
+                   randomize: bool = False,
+                   seed: int = 42,
+                   normalized: bool = True,
+                   normalize_type: str = 'default'):
 
     if has_duration:
         hf_data = {
@@ -92,8 +98,11 @@ def get_typed_data(dataset, audio_name: str,
         hf_data = hf_data.shuffle(seed=seed)
 
     if normalized:
+        if normalize_type == 'default':
+            normalize_f = normalize
+
         hf_data = hf_data.map(
-            lambda x: {text_name: [normalize(t, norm_mono=norm_mono) for t in x[text_name]]},
+            lambda x: {text_name: [normalize_f(t) for t in x[text_name]]},
             batched=True,
             num_proc=4
         )
@@ -106,7 +115,7 @@ def get_typed_data(dataset, audio_name: str,
 def get_data(paths, bad_folder: str, process: bool = True,
              type: int = 1, iters: Optional[int] = None, has_duration: bool = False,
              randomize: bool = False, seed: int = 42, normalized: bool = True, norm_mono: bool = False,
-             filters: List[str] = None, split: str = ''):
+             filters: List[str] = None, split: str = '', normalize_type: str = 'default'):
 
     datasets = {}
     for name, path in paths.items():
@@ -116,7 +125,7 @@ def get_data(paths, bad_folder: str, process: bool = True,
             bad_filepaths = set()
 
             for filter in filters:
-                blacklist = os.path.join(bad_folder, f"bad_by_{filter}_{name}_{split}.csv")
+                blacklist = os.path.join(bad_folder, name, split, f"bad_by_{filter}.csv")
                 if os.path.exists(blacklist):
                     with open(blacklist, 'r', encoding='utf-8') as cf:
                         reader = csv.DictReader(cf)
@@ -165,7 +174,7 @@ def get_data(paths, bad_folder: str, process: bool = True,
                                      randomize,
                                      seed,
                                      normalized,
-                                     norm_mono)
+                                     normalize_type)
 
         else:
             hf_data = dataset

@@ -2,7 +2,7 @@ from typing import Dict
 
 from speechLM_utils.dual_fusion_model import DualFusionModel
 import torch
-from speechLM_utils.checkpoint import get_max_step, get_min_step
+from speechLM_utils.checkpoint import get_max_step
 import os
 import torch.nn as nn
 from os.path import join
@@ -10,8 +10,8 @@ import json
 import safetensors
 
 def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str = 'cuda'):
-    min_step = get_min_step(checkpoint_path)
-    weights_checkpoint = join(checkpoint_path, f"checkpoint-{min_step}")
+    max_step = get_max_step(checkpoint_path)
+    weights_checkpoint = join(checkpoint_path, f"checkpoint-{max_step}")
     print('Found checkpoint to load: ', weights_checkpoint)
 
     index_file = os.path.join(weights_checkpoint, "model.safetensors.index.json")
@@ -49,8 +49,8 @@ def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str
             print(f"[{device}] WARNING: No projector/adapter keys found in Stage 1 checkpoint!")
 
         missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
-        print('Missing keys:', len(missing_keys))
-        print('Unexpected keys:', len(unexpected_keys))
+        print('Missing keys:', missing_keys)
+        print('Unexpected keys:', unexpected_keys)
 
         missing_cross_attn = [k for k in missing_keys if 'cross_attention' in k]
         if missing_cross_attn:
@@ -62,52 +62,55 @@ def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str
     except Exception as e:
         print(f"[{device}] Error: Could not load weights. {e}")
 
-    return model, min_step
+    return model, max_step
 
-def get_model(model_type, args: Dict, info: Dict, device = 'cuda', exp: int = 0, attn_implementation: str = 'sdpa'):
-    if model_type == 'dual_fusion':
-        model = DualFusionModel(
-            speech_encoder_model_id=info['speech_encoder_id'],
-            language_model_id=info['language_model_id'],
-            blank_training=args['blank_training'],
-            audio_dropout=args['audio_dropout'],
-            text_perturbation=args['text_perturbation'],
-            text_dropout=args['text_dropout'],
-            spec_augment=args['spec_augment'],
-            include_adapter=args['include_adapter'],
-            input_downsample=args['input_downsample'],
-            static_projector=args['static_projector'],
-            downsample_K=args['downsample_K'],
-            hidden_dim=args['hidden_dim'],
-            static_injection=args['static_injection_layers'],
-            injection_layers=args['injection_layers'],
-            pyramid_layers=args['pyramid_layers'],
-            gated=args['gated_cross_attention'],
-            downsample_L=args['downsample_L'],
-            injection_downsample=args['injection_downsample'],
-            downsamplers=args['downsamplers'],
-            causal_fusion=args['causal_fusion'],
-            positional_info=args['positional_info'],
-            predict_duration=args['predict_duration'],
-            duration_resolution=args['duration_resolution'],
-            max_duration=args['max_duration'],
-            ctc=args['ctc'],
-            audio_forecasting=args['audio_forecasting'],
-            ctc_weight=args['ctc_weight'],
-            audio_weight=args['audio_weight'],
-            duration_weight=args['duration_weight'],
-            lng_lora=args['linguistic_lora'],
-            acoustic_lora=args['acoustic_lora'],
-            lora_params=args['lora_params'],
-            prompt_persona=args['prompt_persona'],
-            prompt_instruction=args['prompt_instruction'],
-            prompt_verbatim=args['prompt_verbatim'],
-            dtype=torch.float32,
-            bit4=info['bit4'],
-            attn_implementation=attn_implementation,
-            device=device,
-            exp=exp
-        )
+def get_model(args: Dict, info: Dict, device = 'cuda', exp: int = 0, attn_implementation: str = 'sdpa'):
+
+    model = DualFusionModel(
+        speech_encoder_model_id=info['speech_encoder_id'],
+        language_model_id=info['language_model_id'],
+        blank_training=args['blank_training'],
+        audio_dropout=args['audio_dropout'],
+        text_perturbation=args['text_perturbation'],
+        text_dropout=args['text_dropout'],
+        spec_augment=args['spec_augment'],
+        include_adapter=args['include_adapter'],
+        input_downsample=args['input_downsample'],
+        static_projector=args['static_projector'],
+        downsample_K=args['downsample_K'],
+        hidden_dim=args['hidden_dim'],
+        static_injection=args['static_injection_layers'],
+        injection_layers=args['injection_layers'],
+        pyramid_layers=args['pyramid_layers'],
+        gated=args['gated_cross_attention'],
+        downsample_L=args['downsample_L'],
+        injection_downsample=args['injection_downsample'],
+        downsamplers=args['downsamplers'],
+        causal_fusion=args['causal_fusion'],
+        positional_info=args['positional_info'],
+        layer_wise_fusion=args['layer_wise_fusion'],
+        layer_weights_static=args['layer_weights_static'],
+        predict_duration=args['predict_duration'],
+        duration_resolution=args['duration_resolution'],
+        max_duration=args['max_duration'],
+        ctc=args['ctc'],
+        audio_forecasting=args['audio_forecasting'],
+        ctc_weight=args['ctc_weight'],
+        audio_weight=args['audio_weight'],
+        duration_weight=args['duration_weight'],
+        lng_lora=args['linguistic_lora'],
+        lora_r=args['lora_r'],
+        acoustic_lora=args['acoustic_lora'],
+        lora_params=args['lora_params'],
+        prompt_persona=args['prompt_persona'],
+        prompt_instruction=args['prompt_instruction'],
+        prompt_verbatim=args['prompt_verbatim'],
+        dtype=torch.float32,
+        bit4=True,
+        attn_implementation=attn_implementation,
+        device=device,
+        exp=exp
+    )
 
     tokenizer = model.language_tokenizer
 

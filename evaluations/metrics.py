@@ -4,7 +4,7 @@ import pandas as pd
 from typing import Tuple
 
 
-def get_metrics(predictions, references, indices, durations, with_total_metrics: bool = False) -> Tuple[
+def get_metrics(predictions, references, indices, durations, verbose: bool = True) -> Tuple[
     pd.DataFrame, pd.DataFrame]:
     norm_predictions = [normalize(t, with_signs=False) for t in predictions]
     norm_references = [normalize(t, with_signs=False) for t in references]
@@ -12,12 +12,26 @@ def get_metrics(predictions, references, indices, durations, with_total_metrics:
     predictions = [normalize(t, with_signs=True) for t in predictions]
     references = [normalize(t, with_signs=True) for t in references]
 
+    valid_data = [
+        (p, r, np, nr, i, d) for p, r, np, nr, i, d in zip(
+            predictions, references, norm_predictions, norm_references, indices, durations
+        ) if len(r.strip()) > 0 and len(nr.strip()) > 0
+    ]
+
+    dropped_count = len(references) - len(valid_data)
+    if dropped_count > 0 and verbose:
+        print(f"Skipping {dropped_count} samples due to empty reference strings after normalization.")
+
+    if not valid_data:
+        return pd.DataFrame(), pd.DataFrame()
+
+    predictions, references, norm_predictions, norm_references, indices, durations = map(list, zip(*valid_data))
+
     wers, cers, ratio = [], [], []
     n_wers, n_cers, n_ratio = [], [], []
     subs, ins, dels = [], [], []
 
-    for reference, prediction, n_reference, n_prediction in zip(references, predictions, norm_references,
-                                                                norm_predictions):
+    for reference, prediction, n_reference, n_prediction in zip(references, predictions, norm_references, norm_predictions):
         wers.append(jiwer.wer(reference, prediction))
         n_wers.append(jiwer.wer(n_reference, n_prediction))
         cers.append(jiwer.cer(reference, prediction))
@@ -46,8 +60,7 @@ def get_metrics(predictions, references, indices, durations, with_total_metrics:
 
     results_per_instance = pd.DataFrame(results_per_instance)
 
-    total_results = None
-    if with_total_metrics:
+    if verbose:
         total_wer = jiwer.wer(references, predictions)
         total_n_wer = jiwer.wer(norm_references, norm_predictions)
         total_cer = jiwer.cer(references, predictions)
@@ -76,5 +89,7 @@ def get_metrics(predictions, references, indices, durations, with_total_metrics:
         }
 
         total_results = pd.DataFrame(total_results)
+    else:
+        total_results = None
 
     return results_per_instance, total_results

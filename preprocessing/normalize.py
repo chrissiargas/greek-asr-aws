@@ -3,24 +3,22 @@ import unicodedata
 
 vowel_pattern = re.compile(r'(αι|ει|οι|υι|ου|αυ|ευ|ηυ|α|ε|η|ι|ο|υ|ω|ά|έ|ή|ί|ό|ύ|ώ)', re.IGNORECASE)
 
-def _remove_accents(text: str) -> str:
-    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+def clean_whitespaces(text):
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-def _is_monosyllabic(word: str) -> bool:
-    vowels = vowel_pattern.findall(word)
-    return len(vowels) == 1
+def normalize_symbols(text):
+    text = text.replace('«', '"').replace('»', '"')
+    text = text.replace('“', '"').replace('”', '"')
+    text = text.replace('‘', "'").replace('’', "'")
+    text = text.replace('„', '"').replace('”', '"')
+    text = text.replace('—', '-').replace('–', '-')
+    text = text.replace('…', '...')
 
-def normalize_monosyllables(text: str) -> str:
-    words = text.split()
-    normalized_words = []
-    for word in words:
-        if _is_monosyllabic(word):
-            normalized_words.append(_remove_accents(word))
-        else:
-            normalized_words.append(word)
-    return " ".join(normalized_words)
+    return text
 
-def normalize(text, ss: bool = False, s_: bool = False, with_signs: bool = True, norm_mono: bool = False):
+
+def normalize(text, ss: bool = False, with_signs=True):
     if not text:
         return ''
 
@@ -29,49 +27,32 @@ def normalize(text, ss: bool = False, s_: bool = False, with_signs: bool = True,
     if ss:
         text = text.replace('ς', 'σ')
 
-    if s_:
-        text = text.replace('ς', '')
+    text = unicodedata.normalize('NFC', text)
+    text = normalize_symbols(text)
 
-    text = text.replace('«', '"').replace('»', '"')
-    text = text.replace('“', '"').replace('”', '"')
-    text = text.replace('‘', "'").replace('’', "'")
-    text = text.replace('—', '-').replace('–', '-')
-    text = text.replace('…', '...')
-
-    # 2. Remove speaker tags at the beginning (e.g. ομιλητής 1: ")
+    # Remove speaker tags at the beginning
     text = re.sub(r'^\s*[\w\s\.\-]{1,30}:\s*', '', text)
 
-    # Remove acoustic tags like <spoken_noise>, <unk>
-    text = re.sub(r'<[^>]+>', ' ', text)
-
     # Remove transcriber notes in parentheses or brackets e.g., (Χειροκροτήματα)
-    text = re.sub(r'\[.*?\]|\(.*?\)', ' ', text)
+    text = re.sub(r'\[.*?\]|\(\(.*?\)\)|\(.*?\)|<[^>]+>', ' ', text)
 
-    # Collapse multiple spaces into a single space and strip edges
-    text = re.sub(r'\s+', ' ', text).strip()
+    # This safely deletes any stray (, ), <, >, [, or ] left in the string
+    text = re.sub(r'[()<>\[\]\']', '', text)
 
     if with_signs:
         text = re.sub(r'([^\w\s])\1*', r' \g<0> ', text)
     else:
         text = re.sub(r'[^\w\s]', ' ', text)
 
-    text = re.sub(r'\s+', ' ', text)
+    text = clean_whitespaces(text)
 
-    if norm_mono:
-        text = normalize_monosyllables(text)
-
-    return text.strip()
-
-def remove_signs(text):
-    try:
-        text = re.sub(r'[^\w\s]', ' ', text)
-        text = re.sub(r'\s+', ' ', text)
-    except:
-        print(text)
-
-    return text.strip()
+    return text
 
 if __name__ == "__main__":
-    sentence = 'Έχω ένα μικρό... Ελεφαντάκι!'
-    print(normalize(sentence, with_signs=False))
-    print(normalize(sentence, with_signs=True))
+    sentence = "Καθηγητής Σ.-Μ.: Λοιπόν… (καθαρίζει το λαιμό του) όταν: αναλύουμε το έργο «Η Αρχαιολογία της Γνώσης» του 1969 —ένα ορόσημο– η αντίδραση του Deleuze’s ήταν <παύση> “εκρηκτική”. Στο 3ο κεφάλαιο αναφέρει: „Η γλώσσα είναι μια πρόσφατη επινόηση”. [χειροκροτήματα] Ακριβώς όπως διαβάζουμε και στο ((The Self-Assembling Brain)), η δομή αλλάζει συνεχώς!"
+    print(sentence)
+    sentence_ = normalize(sentence, with_signs=True)
+    print(sentence_)
+    sentence__ = normalize(sentence_, with_signs=False)
+    print(sentence__)
+    print(sentence__ == sentence_)

@@ -14,6 +14,8 @@ def set_environment():
     os.environ['HF_DATASETS_CACHE'] = os.path.join(os.environ['HF_HOME'], 'datasets')
     os.environ['TMPDIR'] = conf.tmpdir
 
+    os.environ['WANDB_API_KEY']="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"
+
 if __name__ == '__main__':
     set_environment()
 

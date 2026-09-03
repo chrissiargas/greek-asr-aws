@@ -16,6 +16,16 @@ PAD_IDX = CHAR2ID["<pad>"]
 UNK_IDX = CHAR2ID["<unk>"]
 NUM_CLASSES = len(ALL_CHARS)
 
+PROMPT_VERBATIM = "Κατά λέξη μεταγραφή: "
+PROMPT_FORMAL = "Κανονικοποιημένη μεταγραφή: "
+
+DATASET_PROMPT_MAP = {
+    'common_voice': PROMPT_VERBATIM,
+    'fleurs': PROMPT_VERBATIM,
+    'logotypographia': PROMPT_VERBATIM,
+    'stoma': PROMPT_VERBATIM
+}
+
 def compute_length(batch):
     return {"length": len(batch["audio"]["array"])}
 
@@ -82,9 +92,7 @@ class DataCollator(object):
             transcriptions = [x["reference"] + self.language_tokenizer.eos_token for x in instances]
 
         if self.prompt_verbatim:
-            tags = ["Κατά λέξη μεταγραφή: "
-                    if x.get('dataset_name', '') in ['common_voice', 'fleurs', 'logotypographia', 'stoma']
-                    else "Κανονικοποιημένη μεταγραφή: " for x in instances]
+            tags = list(map(lambda x: DATASET_PROMPT_MAP.get(x.get('dataset_name'), PROMPT_FORMAL), instances))
 
             tag_tokens = self.language_tokenizer(
                 tags,
