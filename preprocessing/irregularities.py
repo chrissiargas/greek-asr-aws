@@ -86,28 +86,28 @@ def check_ratio(data, info, bad_folder, min_thres=2, max_thres=30):
 
 
 def get_issue(x, patterns):
-    text = x['text'].strip()
+    text = x['text']
 
-    if not text:
+    if text is None:
         return 'empty_text'
 
-    elif patterns['acoustic'].search(text):
-       return 'acoustic_tag'
+    cleaned_text = normalize(text, with_signs=True)
 
-    elif patterns['speaker'].search(text):
-        return 'speaker_tag'
+    if not cleaned_text.strip():
+        return 'empty_after_normalization'
 
-    clean_text = re.sub(r'[\s\.,;!\?\'"«»\-]', '', text)
-    if len(clean_text) > 0:
-        greek_chars = patterns['greek'].findall(clean_text)
-        greek_ratio = len(greek_chars) / len(clean_text)
+    invalid_match = patterns['invalid_chars'].search(cleaned_text)
+    if invalid_match:
+        bad_char = invalid_match.group(0)
+        return f"invalid character detected: '{bad_char}'"
 
-        if greek_ratio < 0.7:
-            return "foreign_text"
+    if not patterns['greek'].search(cleaned_text):
+        return 'no_greek_content'
 
     return 'none'
 
-def check_text(data, info, bad_folder, foreign_max_threshold=0.4):
+
+def check_text(data, info, bad_folder):
     progress_bar = tqdm(
         data,
         leave=True,
@@ -116,16 +116,14 @@ def check_text(data, info, bad_folder, foreign_max_threshold=0.4):
     )
 
     patterns = {
-        'acoustic': re.compile(r'[\[\(\<\{].*?[\]\)\>\}]'),
-        'speaker': re.compile(r'^[\w\u0370-\u03FF\u1F00-\u1FFF]+\s*\d*:\s'),
-        'digits': re.compile(r'\d+'),
+        'invalid_chars': re.compile(r'[^\u0370-\u03FF\u1F00-\u1FFF]a-zA-Z0-9\s\.,:;!\?\'"«»„”\-%\+\*\/=€$#]'),
         'latin': re.compile(r'[a-zA-Z]'),
         'greek': re.compile(r'[\u0370-\u03FF\u1F00-\u1FFF]')
     }
 
     issues = []
     for i, entry in enumerate(progress_bar):
-        issues.append(get_issue(entry, patterns, foreign_max_threshold))
+        issues.append(get_issue(entry, patterns))
 
     issues = np.array(issues)
     bad_indices = np.where(issues != 'none')[0]
@@ -149,6 +147,7 @@ patterns = {
     "cutoff_word": re.compile(r'\w+~'),
     "foreign_character": re.compile(r'[^\x00-\x7FáéíóöőúüűÁÉÍÓÖŐÚÜŰ]'),
 }
+
 
 def run_check(datasets, splits):
     conf = Parser()
@@ -180,7 +179,8 @@ def run_check(datasets, splits):
                 'threshold': 0.1
             }
 
-            manifest_folder = os.path.join(os.path.expanduser('~'), conf.dataset_path, conf.language, dataset, 'manifests')
+            manifest_folder = os.path.join(os.path.expanduser('~'), conf.dataset_path, conf.language, dataset,
+                                           'manifests')
 
             file = os.path.join(manifest_folder, f'{conf.language}_{split}.json')
             if not os.path.exists(file):
@@ -200,14 +200,15 @@ def run_check(datasets, splits):
             print('checking ratio anomalies')
             check_ratio(data, info, bad_folder, **DEFAULT_THRESHOLDS['ratio'])
             print('checking text anomalies')
-            check_text(data, info, bad_folder, **DEFAULT_THRESHOLDS['text'])
+            check_text(data, info, bad_folder)
 
 
 import argparse
 
 if '__main__' == __name__:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--datasets', nargs='+', type=str, default=['common_voice', 'fleurs', 'hparl', 'logotypographia', 'tedx', 'stoma'],
+    parser.add_argument('--datasets', nargs='+', type=str,
+                        default=['common_voice', 'fleurs', 'hparl', 'logotypographia', 'tedx', 'stoma'],
                         help='datasets')
     parser.add_argument('--splits', nargs='+', type=str, default=['train', 'validation', 'test'], help='datasets')
     args, unknown = parser.parse_known_args()

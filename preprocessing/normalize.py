@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 
 vowel_pattern = re.compile(r'(αι|ει|οι|υι|ου|αυ|ευ|ηυ|α|ε|η|ι|ο|υ|ω|ά|έ|ή|ί|ό|ύ|ώ)', re.IGNORECASE)
 
@@ -17,6 +18,15 @@ def normalize_symbols(text):
 
     return text
 
+GREEK_ACCENTS = {
+    'ά': 'α', 'έ': 'ε', 'ή': 'η', 'ί': 'ι', 'ό': 'ο', 'ύ': 'υ', 'ώ': 'ω',
+    'ϊ': 'ι', 'ϋ': 'υ', 'ΐ': 'ι', 'ΰ': 'υ'
+}
+
+def strip_greek_accents(text):
+    for accented, unaccented in GREEK_ACCENTS.items():
+        text = text.replace(accented, unaccented)
+    return text
 
 def normalize(text, ss: bool = False, with_signs=True):
     if not text:
@@ -48,11 +58,18 @@ def normalize(text, ss: bool = False, with_signs=True):
 
     return text
 
+whisper_normalizer = BasicTextNormalizer()
+def whisper_normalize(text):
+    if not text:
+        return ''
+
+    return whisper_normalizer(text)
+
 if __name__ == "__main__":
     sentence = "Καθηγητής Σ.-Μ.: Λοιπόν… (καθαρίζει το λαιμό του) όταν: αναλύουμε το έργο «Η Αρχαιολογία της Γνώσης» του 1969 —ένα ορόσημο– η αντίδραση του Deleuze’s ήταν <παύση> “εκρηκτική”. Στο 3ο κεφάλαιο αναφέρει: „Η γλώσσα είναι μια πρόσφατη επινόηση”. [χειροκροτήματα] Ακριβώς όπως διαβάζουμε και στο ((The Self-Assembling Brain)), η δομή αλλάζει συνεχώς!"
     print(sentence)
-    sentence_ = normalize(sentence, with_signs=True)
+    sentence_ = whisper_normalize(sentence)
     print(sentence_)
-    sentence__ = normalize(sentence_, with_signs=False)
+    sentence__ = whisper_normalize(sentence_)
     print(sentence__)
     print(sentence__ == sentence_)

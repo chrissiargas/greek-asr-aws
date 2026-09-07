@@ -47,9 +47,12 @@ def gpu_evaluate(data, gpu_id, args):
         "task": "transcribe",
         "return_timestamps": False,
         "num_beams": 5,
+        "condition_on_prev_tokens": False,
         "repetition_penalty": 1.15,
         "length_penalty": 1.0,
-        "no_repeat_ngram_size": 4
+        "no_repeat_ngram_size": 4,
+        "temperature": 0.0
+
     }
 
     if len(base_gen_kwargs) > 0:
@@ -97,7 +100,7 @@ def gpu_evaluate(data, gpu_id, args):
 
     indices = data['index']
     durations = data['duration']
-    res_samples, _ = get_metrics(predictions, references, indices, durations, verbose=False)
+    res_samples, _ = get_metrics(predictions, references, indices, durations, verbose=False, is_whisper=True)
 
     samples_path = os.path.join(args['res_folder'], f"predictions_{gpu_id}.csv")
     res_samples.to_csv(samples_path)
@@ -161,7 +164,8 @@ def evaluate(args, dataset: str, split: str = 'test'):
                                normalized=False,
                                has_duration=True,
                                filters=FILTERS,
-                               split=split)
+                               split=split,
+                               normalize_type='whisper')
     evaluation_data = concatenate(evaluation_data)
 
     print(f"Evaluating on {dataset} ({len(evaluation_data)} samples)...")
@@ -181,7 +185,7 @@ def evaluate(args, dataset: str, split: str = 'test'):
 
 import argparse
 
-FILTERS = ['duration', 'length']
+FILTERS = []
 
 if __name__ == "__main__":
     print('Starting...')
