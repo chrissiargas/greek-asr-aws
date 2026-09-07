@@ -64,7 +64,6 @@ def gpu_evaluate(data, gpu_id, args):
         "feature_extractor": processor.feature_extractor,
         "torch_dtype": torch_dtype,
         "device": f"cuda:{gpu_id}",
-        "chunk_length_s": 30.0,
         "batch_size": batch_size,
     }
 
