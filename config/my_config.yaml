@@ -7,11 +7,17 @@ data_args:
   other_to_train: True
 
 main_args:
+  #'common_voice', 'fleurs', 'massive', 'voxpopuli', 'yodas', 'dataocean_asr_657', 'dataocean_asr_659', 'datatang_asr_1', 'datatang_asr_2'
   datasets:
     - common_voice
     - fleurs
-    - css10
-    - hparl
+    - massive
+    - voxpopuli
+    - yodas
+    - dataocean_asr_657
+    - dataocean_asr_659
+    - datatang_asr_1
+    - datatang_asr_2
   split_type: 'default'
   splitting: false
   results_path: "cache/results"
@@ -95,13 +101,13 @@ dual_fuse_args:
 
     # --- LOGGING & SAVING ---
     'report_to': 'wandb',
-    'logging_steps': 50,
+    'logging_steps': 10,
     'save_strategy': 'steps',
     'save_steps': 500,
     'eval_strategy': 'steps',
     'eval_steps': 500,
     'save_total_limit': 3,
-    'eval_accumulation_steps': 2,
+    'eval_accumulation_steps': 4,
     'per_device_eval_batch_size': 4,
     'num_train_epochs': 60,
 

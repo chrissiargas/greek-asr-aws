@@ -238,7 +238,7 @@ if __name__ == "__main__":
     parser.add_argument('--interleave', default=True, help='interleave data', type=lambda x: bool(strtobool(x)))
     parser.add_argument('--attn_implementation', type=str, default='sdpa', help='attention implementation type')
     parser.add_argument('--speech_encoder_id', type=str, default='openai/whisper-large-v3', help='speech encoder id')
-    parser.add_argument('--language_model_id', type=str, default='elte-nlp/Racka-4B', help='language model id')
+    parser.add_argument('--language_model_id', type=str, default='ilsp/Llama-Krikri-8B-Instruct', help='language model id')
     parser.add_argument('--filters', type=str, nargs='+', default=['duration', 'length', 'text'])
 
     args, unknown = parser.parse_known_args()
