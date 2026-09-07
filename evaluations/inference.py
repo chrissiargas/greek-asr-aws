@@ -139,7 +139,7 @@ def get_total_metrics(base_filename: str):
     indices = merged_df['index'].tolist()
     durations = merged_df['duration'].tolist()
 
-    res_samples, total_results = get_metrics(predictions, references, indices, durations)
+    res_samples, total_results = get_metrics(predictions, references, indices, durations, is_whisper=True)
 
     res_samples.to_csv(f"{base_filename}.csv", index=False)
     total_results.to_csv(f"{base_filename}_total_metrics.csv", index=False)
