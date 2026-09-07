@@ -38,7 +38,7 @@ def get_tags(args: Dict, info: Dict, datasets: List[str]):
 
     ## Cross-Attention Injection Configurations
     tags.append('downsample_L: ' + str(args['downsample_L']))
-    tags.append('injection_layers: ' + ', '.join(args['injection_layers']))
+    tags.append('injection_layers: ' + ', '.join(str(layer) for layer in args['injection_layers']))
     if args['gated_cross_attention']:
         tags.append('gated_cross_attention')
     if args['causal_fusion']:
