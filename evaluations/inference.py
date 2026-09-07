@@ -31,6 +31,8 @@ from preprocessing.parallel import parallelize_process, concat_dataframes
 from evaluations.metrics import get_metrics
 import json
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 def gpu_evaluate(data, gpu_id, args):
     data = Dataset.from_dict(data)
@@ -64,6 +66,7 @@ def gpu_evaluate(data, gpu_id, args):
         "feature_extractor": processor.feature_extractor,
         "torch_dtype": torch_dtype,
         "device": f"cuda:{gpu_id}",
+        "chunk_length_s": 30.0,
         "batch_size": batch_size,
     }
 
@@ -138,7 +141,7 @@ def get_total_metrics(base_filename: str):
     indices = merged_df['index'].tolist()
     durations = merged_df['duration'].tolist()
 
-    res_samples, total_results = get_metrics(predictions, references, indices, durations, is_whisper=True)
+    res_samples, total_results = get_metrics(predictions, references, indices, durations)
 
     res_samples.to_csv(f"{base_filename}.csv", index=False)
     total_results.to_csv(f"{base_filename}_total_metrics.csv", index=False)
@@ -163,8 +166,8 @@ def evaluate(args, dataset: str, split: str = 'test'):
                                normalized=False,
                                has_duration=True,
                                filters=FILTERS,
-                               split=split)
-
+                               split=split,
+                               normalize_type='whisper')
     evaluation_data = concatenate(evaluation_data)
 
     print(f"Evaluating on {dataset} ({len(evaluation_data)} samples)...")
