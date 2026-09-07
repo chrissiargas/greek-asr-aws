@@ -164,8 +164,8 @@ def evaluate(args, dataset: str, split: str = 'test'):
                                normalized=False,
                                has_duration=True,
                                filters=FILTERS,
-                               split=split,
-                               normalize_type='whisper')
+                               split=split)
+
     evaluation_data = concatenate(evaluation_data)
 
     print(f"Evaluating on {dataset} ({len(evaluation_data)} samples)...")
