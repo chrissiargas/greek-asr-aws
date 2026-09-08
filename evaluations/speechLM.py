@@ -17,6 +17,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 set_environment()
 
 import transformers
+
 transformers.logging.set_verbosity_error()
 
 from config.parser import Parser
@@ -36,6 +37,52 @@ from tqdm.auto import tqdm
 from speechLM_utils.utils import init_gpu, resume_wandb, init
 from speechLM_utils.model import get_max_step
 import argparse
+import csv
+from preprocessing.normalize import normalize
+
+
+class StreamingSeq2SeqTrainer(Seq2SeqTrainer):
+    def __init__(self, *args, streaming_save_path=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.streaming_save_path = streaming_save_path
+        self.is_main_process = int(os.environ.get("LOCAL_RANK", -1)) in [-1, 0]
+
+        if self.is_main_process and self.streaming_save_path:
+            os.makedirs(os.path.dirname(self.streaming_save_path), exist_ok=True)
+            with open(self.streaming_save_path, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["index", "reference", "prediction", "duration"])
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        loss, generated_tokens, labels = super().prediction_step(
+            model, inputs, prediction_loss_only, ignore_keys=ignore_keys
+        )
+
+        if prediction_loss_only or generated_tokens is None:
+            return loss, generated_tokens, labels
+
+        if self.is_main_process and self.streaming_save_path:
+            gen_ids = generated_tokens.detach().cpu().numpy()
+            lbl_ids = labels.detach().cpu().numpy()
+
+            gen_ids = np.where(gen_ids != -100, gen_ids, self.tokenizer.pad_token_id)
+            preds = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+            preds = [normalize(pd, with_signs=True) for pd in preds]
+
+            lbl_ids = np.where(lbl_ids != -100, lbl_ids, self.tokenizer.pad_token_id)
+            refs = self.tokenizer.batch_decode(lbl_ids, skip_special_tokens=True)
+            refs = [normalize(rf, with_signs=True) for rf in refs]
+
+            indices = inputs.get("index").cpu().numpy() if "index" in inputs else [None] * len(preds)
+            durations = inputs.get("duration").cpu().numpy() if "duration" in inputs else [None] * len(preds)
+
+            with open(self.streaming_save_path, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                for idx, ref, pred, dur in zip(indices, refs, preds, durations):
+                    writer.writerow([idx, ref, pred, dur])
+
+        return loss, generated_tokens, labels
+
 
 class PredictionProgressCallback(TrainerCallback):
     def __init__(self):
@@ -64,10 +111,11 @@ class PredictionProgressCallback(TrainerCallback):
             self.prediction_bar.close()
             self.prediction_bar = None
 
-def load_model(model_type, args, info, checkpoint_path, checkpoint_dir=None, device='cuda'):
+
+def load_model(args, info, checkpoint_path, checkpoint_dir=None, device='cuda'):
     print(f"Initializing model...")
 
-    model, tokenizer = get_model(model_type, args, info, device)
+    model, tokenizer = get_model(args, info, device)
 
     if checkpoint_dir is None:
         max_step = get_max_step(checkpoint_path)
@@ -108,6 +156,7 @@ def load_model(model_type, args, info, checkpoint_path, checkpoint_dir=None, dev
     model.eval()
     return model
 
+
 def debug_predictions(predictions, references, generated_ids, label_ids, tokenizer):
     pad_id = tokenizer.pad_token_id
     eos_id = tokenizer.eos_token_id
@@ -131,22 +180,29 @@ def debug_predictions(predictions, references, generated_ids, label_ids, tokeniz
         print(ref_len)
 
 
-def get_eval_metrics(data, model_type, conf, args, info, checkpoint_path, checkpoint_dir, device = 'cuda'):
+def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, device='cuda'):
     training_args = conf.eval_args.training_args
     training_args['report_to'] = "none"
-    training_args['generation_config'] = GenerationConfig(**training_args['generation_config'])
+    if info['gen_kwargs'] is None:
+        training_args['generation_config'] = GenerationConfig(**training_args['generation_config'])
+    else:
+        training_args['generation_config'] = info['gen_kwargs']
+
     training_args['disable_tqdm'] = True
 
-    # 1. Extract the generation config dictionary from your YAML
     gen_config_obj = training_args.pop('generation_config', {})
+
     training_args = Seq2SeqTrainingArguments(**training_args)
 
-    model = load_model(model_type, args, info, checkpoint_path, checkpoint_dir, device)
+    model = load_model(args, info, checkpoint_path, checkpoint_dir, device)
     tokenizer = model.language_tokenizer
 
     gen_kwargs = gen_config_obj.to_dict() if hasattr(gen_config_obj, "to_dict") else gen_config_obj
     model.language_model.generation_config.update(**gen_kwargs)
     model.generation_config = model.language_model.generation_config
+
+    print('Generation Configurations:')
+    print(model.generation_config)
 
     collator = DataCollator(processor=model.processor,
                             language_tokenizer=tokenizer,
@@ -155,14 +211,17 @@ def get_eval_metrics(data, model_type, conf, args, info, checkpoint_path, checkp
                             has_audio_lb_tokens=True,
                             has_duration_lb=args['predict_duration'],
                             to_chars=args['ctc'] or args['injection_downsample'] == 'cif',
-                            contain_index=False)
+                            contain_index=True)
 
-    trainer = Seq2SeqTrainer(
+    samples_path = os.path.join(info['res_folder'], "predictions.csv")
+
+    trainer = StreamingSeq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
         data_collator=collator,
         args=training_args,
-        callbacks=[PredictionProgressCallback()]
+        callbacks=[PredictionProgressCallback()],
+        streaming_save_path=samples_path
     )
 
     print(f"Starting inference on {len(data)} samples...")
@@ -188,9 +247,8 @@ def get_eval_metrics(data, model_type, conf, args, info, checkpoint_path, checkp
 
     print(f"Computing metrics...")
 
-    res_samples, res_total = get_metrics(predictions, references, indices, durations, with_total_metrics=True)
+    res_samples, res_total = get_metrics(predictions, references, indices, durations, verbose=True)
 
-    samples_path = os.path.join(info['res_folder'], "predictions.csv")
     total_path = os.path.join(info['res_folder'], "results.csv")
 
     res_samples.to_csv(samples_path)
@@ -208,110 +266,149 @@ def get_eval_metrics(data, model_type, conf, args, info, checkpoint_path, checkp
 
     return samples_path, total_path
 
-def get_results_path(conf, info, data_folder: bool = True):
+
+def get_results_path(conf, info, dataset, split='test', data_folder: bool = True):
     results_path = os.path.join(os.path.expanduser('~'),
                                 conf.results_path,
-                                info['model_type'],
+                                'dual_fusion_checkpoints',
                                 info['machine'],
                                 info['model_name'],
                                 info['datetime'],
                                 str(info['turn']))
 
     if data_folder:
-        results_path = os.path.join(results_path, info['test_dataset'])
+        if info['name'] is not None:
+            results_path = os.path.join(results_path, str(dataset), split, info['name'])
+        else:
+            results_path = os.path.join(results_path, str(dataset), split)
 
     os.makedirs(results_path, exist_ok=True)
 
     return results_path
 
-def evaluate(info, set='test', device='cuda', iters = None):
-    conf, args, _, bad_folder, _, checkpoint_path, checkpoint_dir, _ = init(info['model_type'], info, restart=False)
 
-    res_folder = get_results_path(conf, info)
-    info['res_folder'] = res_folder
+def get_bad_folder_path(conf):
+    bad_folder_path = os.path.join(os.path.expanduser('~'),
+                                   conf.dataset_path,
+                                   conf.language,
+                                   'bad_folder')
 
-    if type(info['test_dataset']) is not list:
-        dataset_names = [info['test_dataset']]
+    return bad_folder_path
+
+
+def evaluate(info, dataset, split='test', device='cuda', iters=None):
+    conf, args, _, _, checkpoint_path, checkpoint_dir, _ = init(info, restart=False)
+
+    info['res_folder'] = get_results_path(conf, info, dataset, split)
+    bad_folder = get_bad_folder_path(conf)
+
+    if not isinstance(dataset, list):
+        dataset_names = [dataset]
     else:
-        dataset_names = info['test_dataset']
+        dataset_names = dataset
 
-    split = splitter()
-    data = split.split(datasets=dataset_names)
-    data_set = get_data(data[set], bad_folder, iters=iters, normalized=False, has_duration=True, filters=FILTERS, split=set)
-    data_set = concatenate(data_set)
+    split_manager = splitter(conf=conf)
+    data = split_manager.split(datasets=dataset_names)
 
-    print(f"Evaluating on {dataset_names} ({len(data_set)} samples)...")
-    get_eval_metrics(data_set, info['model_type'], conf, args, info, checkpoint_path, checkpoint_dir, device)
+    evaluation_data = get_data(data[split],
+                               bad_folder,
+                               filters=FILTERS,
+                               split=split,
+                               iters=iters,
+                               randomize=args.randomize,
+                               has_duration=True,
+                               normalize_type=args.normalize)
+
+    evaluation_data = concatenate(evaluation_data)
+
+    print(f"Evaluating on {dataset_names} ({len(evaluation_data)} samples)...")
+    evaluate_model(evaluation_data, conf, args, info, checkpoint_path, checkpoint_dir, device)
+
 
 FILTERS = ['duration', 'length']
+from distutils.util import strtobool
 
 if __name__ == "__main__":
+    all_datasets = ['common_voice',
+                    'fleurs',
+                    'speech_massive',
+                    'voxpopuli',
+                    'yodas',
+                    'dataocean_asr_657',
+                    'dataocean_asr_659',
+                    'datatang_asr_1',
+                    'datatang_asr_2']
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpus', type=str, default='0,1,2,3', help='GPUs to be used')
     parser.add_argument('--datasets', nargs='+', type=str, default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'], help='datasets')
-    parser.add_argument('--model_type', type=str, default='dual_fusion')
     parser.add_argument('--train_datasets', nargs='+', type=str, default=['common_voice', 'fleurs', 'hparl', 'tedx', 'logotypographia'], help='datasets of the trained models')
     parser.add_argument('--checkpoint_folder', type=str, default='dual_fusion_checkpoints')
-    parser.add_argument('--model_name', type=str, default=None)
     parser.add_argument('--speech_encoder_id', type=str, default='openai/whisper-large-v3')
     parser.add_argument('--language_model_id', type=str, default='ilsp/Llama-Krikri-8B-Instruct')
     parser.add_argument('--machine', type=str, default='kronos')
     parser.add_argument('--datetime', type=str, default=None)
     parser.add_argument('--turn', type=str, default=None)
-    parser.add_argument('--stage', type=int, default=None)
+    parser.add_argument('--exp', type=int, default=0, help='Path to config file')
+    parser.add_argument('--name', type=str, default=None)
+    parser.add_argument('--gen_kwargs', type=json.loads, default={})
+    parser.add_argument('--concat_test', type=lambda x: bool(strtobool(x)), default=False)
 
     args, unknown = parser.parse_known_args()
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
     DATASETS = args.datasets
+    model_name = (args.speech_encoder_id.split('/')[1] + '_' + args.language_model_id.split('/')[1])
 
-    base_info = {
-        'model_type': args.model_type,
+    args_dict = {
         'res_folder': None,
         'train_dataset': args.train_datasets,
-        's_': False,
         'checkpoint_folder': args.checkpoint_folder,
-        'model_name': args.model_name,
+        'model_name': model_name,
         'speech_encoder_id': args.speech_encoder_id,
         'language_model_id': args.language_model_id,
         'bit4': True,
         'machine': args.machine,
         'datetime': args.datetime,
         'turn': args.turn,
-        'stage': args.stage
+        'exp': args.exp,
+        'name': args.name,
+        'gen_kwargs': args.gen_kwargs,
+        'concat_test': args.concat_test
     }
 
-    if base_info['datetime'] is None:
+    if args_dict['datetime'] is None:
         checkpoints_path = os.path.join(os.path.expanduser('~'),
                                         'cache',
                                         'checkpoints',
-                                        base_info['model_type'],
-                                        base_info['machine'],
-                                        base_info['model_name'])
+                                        'dual_fusion_checkpoints',
+                                        args_dict['machine'],
+                                        args_dict['model_name'])
 
         for datetime_folder in os.listdir(checkpoints_path):
-            base_info['datetime'] = datetime_folder.split('@')[-1]
+            args_dict['datetime'] = datetime_folder.split('@')[-1]
             turns = os.listdir(os.path.join(checkpoints_path, datetime_folder))
-            base_info['turn'] = turns[0].replace('checkpoint-', '')
+            args_dict['turn'] = turns[0].replace('checkpoint-', '')
 
             print('\n')
             print('---------------------------------------------------------')
-            print(base_info['machine'])
-            print(base_info['datetime'])
-            print(base_info['turn'])
+            print(args_dict['machine'])
+            print(args_dict['datetime'])
+            print(args_dict['turn'])
             print('---------------------------------------------------------')
 
             local_rank, device = init_gpu()
-            resume_wandb(local_rank, base_info)
+            resume_wandb(local_rank, args_dict['datetime'], args_dict['model_name'], args_dict['exp'])
 
             try:
-                for dataset in DATASETS:
-                    base_info['test_dataset'] = dataset
+                if args_dict['concat_test']:
+                    args_dict['test_dataset'] = DATASETS
+                    evaluate(args_dict, device=device)
+                else:
+                    for dataset in DATASETS:
+                        args_dict['test_dataset'] = dataset
 
-                    evaluate(base_info,
-                             set='test',
-                             device=device,
-                             iters=None)
+                        evaluate(args_dict, device=device)
 
                 wandb.finish()
 
@@ -321,16 +418,16 @@ if __name__ == "__main__":
 
     else:
         local_rank, device = init_gpu()
-        resume_wandb(local_rank, base_info)
+        resume_wandb(local_rank, args_dict['datetime'], args_dict['model_name'], args_dict['exp'])
 
         try:
-            for dataset in DATASETS:
-                base_info['test_dataset'] = dataset
-
-                evaluate(base_info,
-                         set='test',
-                         device=device,
-                         iters=None)
+            if args_dict['concat_test']:
+                args_dict['test_dataset'] = DATASETS
+                evaluate(args_dict, DATASETS, device=device)
+            else:
+                for dataset in DATASETS:
+                    args_dict['test_dataset'] = dataset
+                    evaluate(args_dict, dataset, device=device)
 
             wandb.finish()
 
