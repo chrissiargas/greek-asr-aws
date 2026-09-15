@@ -191,7 +191,6 @@ def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, devi
     training_args['disable_tqdm'] = True
 
     gen_config_obj = training_args.pop('generation_config', {})
-
     training_args = Seq2SeqTrainingArguments(**training_args)
 
     model = load_model(args, info, checkpoint_path, checkpoint_dir, device)
@@ -247,7 +246,7 @@ def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, devi
 
     print(f"Computing metrics...")
 
-    res_samples, res_total = get_metrics(predictions, references, indices, durations, verbose=True)
+    res_samples, res_total = get_metrics(predictions, references, indices, durations, verbose=True, is_whisper=True)
 
     total_path = os.path.join(info['res_folder'], "results.csv")
 
@@ -325,7 +324,7 @@ def evaluate(info, dataset, split='test', device='cuda', iters=None):
     evaluate_model(evaluation_data, conf, args, info, checkpoint_path, checkpoint_dir, device)
 
 
-FILTERS = ['duration', 'length']
+FILTERS = []
 from distutils.util import strtobool
 
 if __name__ == "__main__":
@@ -377,60 +376,20 @@ if __name__ == "__main__":
         'concat_test': args.concat_test
     }
 
-    if args_dict['datetime'] is None:
-        checkpoints_path = os.path.join(os.path.expanduser('~'),
-                                        'cache',
-                                        'checkpoints',
-                                        'dual_fusion_checkpoints',
-                                        args_dict['machine'],
-                                        args_dict['model_name'])
+    local_rank, device = init_gpu()
+    resume_wandb(local_rank, args_dict['datetime'], args_dict['model_name'], args_dict['exp'])
 
-        for datetime_folder in os.listdir(checkpoints_path):
-            args_dict['datetime'] = datetime_folder.split('@')[-1]
-            turns = os.listdir(os.path.join(checkpoints_path, datetime_folder))
-            args_dict['turn'] = turns[0].replace('checkpoint-', '')
+    try:
+        if args_dict['concat_test']:
+            args_dict['test_dataset'] = DATASETS
+            evaluate(args_dict, DATASETS, device=device)
+        else:
+            for dataset in DATASETS:
+                args_dict['test_dataset'] = dataset
+                evaluate(args_dict, dataset, device=device)
 
-            print('\n')
-            print('---------------------------------------------------------')
-            print(args_dict['machine'])
-            print(args_dict['datetime'])
-            print(args_dict['turn'])
-            print('---------------------------------------------------------')
+        wandb.finish()
 
-            local_rank, device = init_gpu()
-            resume_wandb(local_rank, args_dict['datetime'], args_dict['model_name'], args_dict['exp'])
-
-            try:
-                if args_dict['concat_test']:
-                    args_dict['test_dataset'] = DATASETS
-                    evaluate(args_dict, device=device)
-                else:
-                    for dataset in DATASETS:
-                        args_dict['test_dataset'] = dataset
-
-                        evaluate(args_dict, device=device)
-
-                wandb.finish()
-
-            finally:
-                if local_rank in [-1, 0] and wandb.run is not None:
-                    wandb.finish()
-
-    else:
-        local_rank, device = init_gpu()
-        resume_wandb(local_rank, args_dict['datetime'], args_dict['model_name'], args_dict['exp'])
-
-        try:
-            if args_dict['concat_test']:
-                args_dict['test_dataset'] = DATASETS
-                evaluate(args_dict, DATASETS, device=device)
-            else:
-                for dataset in DATASETS:
-                    args_dict['test_dataset'] = dataset
-                    evaluate(args_dict, dataset, device=device)
-
+    finally:
+        if local_rank in [-1, 0] and wandb.run is not None:
             wandb.finish()
-
-        finally:
-            if local_rank in [-1, 0] and wandb.run is not None:
-                wandb.finish()

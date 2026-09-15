@@ -102,6 +102,8 @@ def get_typed_data(dataset,
             normalize_f = normalize
         elif normalize_type == 'whisper':
             normalize_f = BasicTextNormalizer()
+        else:
+            normalize_f = normalize
 
         hf_data = hf_data.map(
             lambda x: {text_name: [normalize_f(t) for t in x[text_name]]},

@@ -15,8 +15,7 @@ set_environment()
 import pandas as pd
 import torch
 from datasets import Dataset
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, SpeechT5ForSpeechToText, SpeechT5Processor, \
-    AutoModelForCTC
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from preprocessing.prepare import get_data
 
 from config.parser import Parser
