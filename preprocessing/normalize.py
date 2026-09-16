@@ -1,34 +1,27 @@
 import re
 import unicodedata
-from transformers.models.whisper.english_normalizer import BasicTextNormalizer
+import num2words
 
 vowel_pattern = re.compile(r'(αι|ει|οι|υι|ου|αυ|ευ|ηυ|α|ε|η|ι|ο|υ|ω|ά|έ|ή|ί|ό|ύ|ώ)', re.IGNORECASE)
 
-def clean_whitespaces(text):
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+def _remove_accents(text: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
-def normalize_symbols(text):
-    text = text.replace('«', '"').replace('»', '"')
-    text = text.replace('“', '"').replace('”', '"')
-    text = text.replace('‘', "'").replace('’', "'")
-    text = text.replace('„', '"').replace('”', '"')
-    text = text.replace('—', '-').replace('–', '-')
-    text = text.replace('…', '...')
+def _is_monosyllabic(word: str) -> bool:
+    vowels = vowel_pattern.findall(word)
+    return len(vowels) == 1
 
-    return text
+def normalize_monosyllables(text: str) -> str:
+    words = text.split()
+    normalized_words = []
+    for word in words:
+        if _is_monosyllabic(word):
+            normalized_words.append(_remove_accents(word))
+        else:
+            normalized_words.append(word)
+    return " ".join(normalized_words)
 
-GREEK_ACCENTS = {
-    'ά': 'α', 'έ': 'ε', 'ή': 'η', 'ί': 'ι', 'ό': 'ο', 'ύ': 'υ', 'ώ': 'ω',
-    'ϊ': 'ι', 'ϋ': 'υ', 'ΐ': 'ι', 'ΰ': 'υ'
-}
-
-def strip_greek_accents(text):
-    for accented, unaccented in GREEK_ACCENTS.items():
-        text = text.replace(accented, unaccented)
-    return text
-
-def normalize(text, ss: bool = False, with_signs=True):
+def normalize(text, ss: bool = False, s_: bool = False, with_signs: bool = True, norm_mono: bool = False):
     if not text:
         return ''
 
@@ -37,39 +30,49 @@ def normalize(text, ss: bool = False, with_signs=True):
     if ss:
         text = text.replace('ς', 'σ')
 
-    text = unicodedata.normalize('NFC', text)
-    text = normalize_symbols(text)
+    if s_:
+        text = text.replace('ς', '')
 
-    # Remove speaker tags at the beginning
+    text = text.replace('«', '"').replace('»', '"')
+    text = text.replace('“', '"').replace('”', '"')
+    text = text.replace('‘', "'").replace('’', "'")
+    text = text.replace('—', '-').replace('–', '-')
+    text = text.replace('…', '...')
+
+    # 2. Remove speaker tags at the beginning (e.g. ομιλητής 1: ")
     text = re.sub(r'^\s*[\w\s\.\-]{1,30}:\s*', '', text)
 
-    # Remove transcriber notes in parentheses or brackets e.g., (Χειροκροτήματα)
-    text = re.sub(r'\[.*?\]|\(\(.*?\)\)|\(.*?\)|<[^>]+>', ' ', text)
+    # Remove acoustic tags like <spoken_noise>, <unk>
+    text = re.sub(r'<[^>]+>', ' ', text)
 
-    # This safely deletes any stray (, ), <, >, [, or ] left in the string
-    text = re.sub(r'[()<>\[\]\']', '', text)
+    # Remove transcriber notes in parentheses or brackets e.g., (Χειροκροτήματα)
+    text = re.sub(r'\[.*?\]|\(.*?\)', ' ', text)
+
+    # Collapse multiple spaces into a single space and strip edges
+    text = re.sub(r'\s+', ' ', text).strip()
 
     if with_signs:
         text = re.sub(r'([^\w\s])\1*', r' \g<0> ', text)
     else:
         text = re.sub(r'[^\w\s]', ' ', text)
 
-    text = clean_whitespaces(text)
+    text = re.sub(r'\s+', ' ', text)
 
-    return text
+    if norm_mono:
+        text = normalize_monosyllables(text)
 
-whisper_normalizer = BasicTextNormalizer()
-def whisper_normalize(text):
-    if not text:
-        return ''
+    return text.strip()
 
-    return whisper_normalizer(text)
+def remove_signs(text):
+    try:
+        text = re.sub(r'[^\w\s]', ' ', text)
+        text = re.sub(r'\s+', ' ', text)
+    except:
+        print(text)
+
+    return text.strip()
 
 if __name__ == "__main__":
-    sentence = "Καθηγητής Σ.-Μ.: Λοιπόν… (καθαρίζει το λαιμό του) όταν: αναλύουμε το έργο «Η Αρχαιολογία της Γνώσης» του 1969 —ένα ορόσημο– η αντίδραση του Deleuze’s ήταν <παύση> “εκρηκτική”. Στο 3ο κεφάλαιο αναφέρει: „Η γλώσσα είναι μια πρόσφατη επινόηση”. [χειροκροτήματα] Ακριβώς όπως διαβάζουμε και στο ((The Self-Assembling Brain)), η δομή αλλάζει συνεχώς!"
-    print(sentence)
-    sentence_ = whisper_normalize(sentence)
-    print(sentence_)
-    sentence__ = whisper_normalize(sentence_)
-    print(sentence__)
-    print(sentence__ == sentence_)
+    sentence = 'Έχω ένα μικρό... Ελεφαντάκι!'
+    print(normalize(sentence, with_signs=False))
+    print(normalize(sentence, with_signs=True))

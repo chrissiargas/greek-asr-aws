@@ -246,7 +246,7 @@ def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, devi
 
     print(f"Computing metrics...")
 
-    res_samples, res_total = get_metrics(predictions, references, indices, durations, verbose=True, is_whisper=True)
+    res_samples, res_total = get_metrics(predictions, references, indices, durations, verbose=True)
 
     total_path = os.path.join(info['res_folder'], "results.csv")
 
