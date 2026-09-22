@@ -162,7 +162,6 @@ def evaluate(args, dataset: str, split: str = 'test'):
     data = split_manager.split(datasets=dataset_names)
     evaluation_data = get_data(data[split],
                                bad_folder,
-                               normalized=False,
                                has_duration=True,
                                filters=FILTERS,
                                split=split,
