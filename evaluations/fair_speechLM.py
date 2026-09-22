@@ -170,7 +170,7 @@ def parse_args():
     parser.add_argument("--manifest", required=True, help="built with fair_eval.py build-manifest")
     parser.add_argument("--out", required=True)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--decoding", default="plain", choices=fe.presets_for("dual_fusion"))
+    parser.add_argument("--decoding", default="legacy", choices=fe.presets_for("dual_fusion"))
     parser.add_argument("--max_new_tokens", type=int, default=None, help="override the preset's cap")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--style_tags", default="auto", choices=["auto", "dataset", "verbatim", "formal", "off"],

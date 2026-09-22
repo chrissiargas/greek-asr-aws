@@ -52,7 +52,7 @@ class WhisperTranscriber:
         sequences = output["sequences"] if isinstance(output, dict) else getattr(output, "sequences", output)
         results = []
         for ids in sequences.tolist():
-            text_ids = [t for t in ids if t not in self.special_ids]  # drop decoder prompt, EOS, padding
+            text_ids = [t for t in ids if t not in self.special_ids]
             results.append({"hypothesis_raw": self.tokenizer.decode(text_ids, skip_special_tokens=True).strip(),
                             "n_tokens": len(text_ids), "hit_cap": len(text_ids) >= self.max_new_tokens})
         return results
@@ -74,9 +74,9 @@ def parse_args():
     parser.add_argument("--out", required=True)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--model_name", default="openai/whisper-large-v3")
-    parser.add_argument("--language", default=None, choices=["el", "hu"],
+    parser.add_argument("--language", default="el", choices=["el", "hu"],
                         help="forced decoding language; defaults to the manifest's language")
-    parser.add_argument("--decoding", default="plain", choices=fe.presets_for("whisper"))
+    parser.add_argument("--decoding", default="whisper_standard", choices=fe.presets_for("whisper"))
     parser.add_argument("--max_new_tokens", type=int, default=None, help="override the preset's cap")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--dtype", default="bfloat16", choices=list(DTYPES),

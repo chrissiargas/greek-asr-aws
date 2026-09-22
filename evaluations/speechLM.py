@@ -194,6 +194,12 @@ def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, devi
     training_args = Seq2SeqTrainingArguments(**training_args)
 
     model = load_model(args, info, checkpoint_path, checkpoint_dir, device)
+
+    lm = model.language_model
+    inner = (lm.get_base_model() if hasattr(lm, "get_base_model") else lm).model
+    _forward = inner.forward
+    inner.forward = lambda *a, **k: _forward(*a, **{**k, "position_ids": None})  # training positions (#4)
+
     tokenizer = model.language_tokenizer
 
     gen_kwargs = gen_config_obj.to_dict() if hasattr(gen_config_obj, "to_dict") else gen_config_obj
@@ -210,7 +216,8 @@ def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, devi
                             has_audio_lb_tokens=True,
                             has_duration_lb=args['predict_duration'],
                             to_chars=args['ctc'] or args['injection_downsample'] == 'cif',
-                            contain_index=True)
+                            contain_index=True,
+                            prompt_verbatim=args['prompt_verbatim'])
 
     samples_path = os.path.join(info['res_folder'], "predictions.csv")
 
@@ -316,7 +323,7 @@ def evaluate(info, dataset, split='test', device='cuda', iters=None):
                                iters=iters,
                                randomize=args.randomize,
                                has_duration=True,
-                               normalize_type=args.normalize)
+                               normalized=False)
 
     evaluation_data = concatenate(evaluation_data)
 

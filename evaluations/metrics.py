@@ -4,16 +4,16 @@ import pandas as pd
 from typing import Tuple
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 from copy import copy
+from evaluations.fair_eval import normalize_nwer, normalize_wer_punct
 
 def get_metrics(predictions, references, indices, durations, verbose: bool = True) -> Tuple[
     pd.DataFrame, pd.DataFrame]:
 
-    whisper_normalizer = BasicTextNormalizer()
-    norm_predictions = [whisper_normalizer(t) for t in predictions]
-    norm_references = [whisper_normalizer(t) for t in references]
+    norm_predictions = [normalize_nwer(t) for t in predictions]
+    norm_references = [normalize_nwer(t) for t in references]
 
-    predictions = [normalize(t) for t in predictions]
-    references = [normalize(t) for t in references]
+    predictions = [normalize_wer_punct(t) for t in predictions]
+    references = [normalize_wer_punct(t) for t in references]
 
     valid_data = [
         (p, r, np, nr, i, d) for p, r, np, nr, i, d in zip(
