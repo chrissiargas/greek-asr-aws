@@ -225,25 +225,25 @@ def visualize_random_instance(info, dataset, split='test', num_samples: int = 20
                 'diagonality_r': res['diagonality_r']
             })
 
-        df_metrics = pd.DataFrame(metrics_records)
+    df_metrics = pd.DataFrame(metrics_records)
 
-        summary = df_metrics.groupby('layer_idx').agg({
-            'norm_entropy': ['mean', 'std'],
-            'diagonality_r': ['mean', 'std']
-        }).round(3)
+    summary = df_metrics.groupby('layer_idx').agg({
+        'norm_entropy': ['mean', 'std'],
+        'diagonality_r': ['mean', 'std']
+    }).round(3)
 
-        print("\n================ Layer Attention Dynamics Summary ================")
-        print(summary)
-        print("==================================================================")
+    print("\n================ Layer Attention Dynamics Summary ================")
+    print(summary)
+    print("==================================================================")
 
-        # Save to disk
-        plots_dir = os.path.join(os.path.expanduser('~'), conf.results_path, 'plots')
-        os.makedirs(plots_dir, exist_ok=True)
-        summary_path = os.path.join(plots_dir, f"{dataset}_attention_dynamics_summary.csv")
-        summary.to_csv(summary_path)
-        print(f"Metrics table saved to: {summary_path}")
+    # Save to disk
+    plots_dir = os.path.join(os.path.expanduser('~'), conf.results_path, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    summary_path = os.path.join(plots_dir, f"{dataset}_attention_dynamics_summary.csv")
+    summary.to_csv(summary_path)
+    print(f"Metrics table saved to: {summary_path}")
 
-        return summary
+    return summary
 
 
 
