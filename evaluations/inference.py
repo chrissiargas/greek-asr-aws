@@ -101,7 +101,7 @@ def gpu_evaluate(data, gpu_id, args):
 
     indices = data['index']
     durations = data['duration']
-    res_samples, _ = get_metrics(predictions, references, indices, durations, verbose=False, is_whisper=True)
+    res_samples, _ = get_metrics(predictions, references, indices, durations, verbose=False)
 
     samples_path = os.path.join(args['res_folder'], f"predictions_{gpu_id}.csv")
     res_samples.to_csv(samples_path)
