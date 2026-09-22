@@ -198,7 +198,7 @@ def evaluate_model(data, conf, args, info, checkpoint_path, checkpoint_dir, devi
     lm = model.language_model
     inner = (lm.get_base_model() if hasattr(lm, "get_base_model") else lm).model
     _forward = inner.forward
-    inner.forward = lambda *a, **k: _forward(*a, **{**k, "position_ids": None})  # training positions (#4)
+    inner.forward = lambda *a, **k: _forward(*a, **{**k, "position_ids": None})
 
     tokenizer = model.language_tokenizer
 
