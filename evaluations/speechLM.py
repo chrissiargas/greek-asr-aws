@@ -67,11 +67,11 @@ class StreamingSeq2SeqTrainer(Seq2SeqTrainer):
 
             gen_ids = np.where(gen_ids != -100, gen_ids, self.tokenizer.pad_token_id)
             preds = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-            preds = [normalize(pd, with_signs=True) for pd in preds]
+            preds = [normalize(pd) for pd in preds]
 
             lbl_ids = np.where(lbl_ids != -100, lbl_ids, self.tokenizer.pad_token_id)
             refs = self.tokenizer.batch_decode(lbl_ids, skip_special_tokens=True)
-            refs = [normalize(rf, with_signs=True) for rf in refs]
+            refs = [normalize(rf) for rf in refs]
 
             indices = inputs.get("index").cpu().numpy() if "index" in inputs else [None] * len(preds)
             durations = inputs.get("duration").cpu().numpy() if "duration" in inputs else [None] * len(preds)
