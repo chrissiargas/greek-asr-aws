@@ -56,9 +56,15 @@ def _cleanup(text):
     text = _BRACKETS_RE.sub(" ", text)
     return text.lower().translate(_QUOTES)
 
+import unicodedata
+strip_accents = lambda s: unicodedata.normalize("NFC", "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"))
+STRIP_ACCENTS = False
 
 def normalize_nwer(text):
-    return _BASIC(_cleanup(text)).strip()
+    text = _BASIC(_cleanup(text)).strip()
+    if STRIP_ACCENTS:
+        text = strip_accents(text)
+    return text
 
 def normalize_wer_punct(text):
     text = re.sub(r"([^\w\s])\1*", r" \g<0> ", _cleanup(text))
