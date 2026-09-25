@@ -15,7 +15,7 @@ import sys
 from os.path import abspath, dirname
 
 sys.path.insert(0, dirname(dirname(abspath(__file__))))
-from speechLM_utils.environment import set_environment
+from environment import set_environment
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
@@ -28,9 +28,8 @@ from transformers import GenerationConfig
 
 transformers.logging.set_verbosity_error()
 
-from evaluations import fair_eval as fe
-from model import get_max_step, get_model
-from utils import init_gpu
+import fair_eval as fe
+from model import get_max_step
 
 PROMPT_VERBATIM = "Κατά λέξη μεταγραφή: "
 PROMPT_FORMAL = "Κανονικοποιημένη μεταγραφή: "

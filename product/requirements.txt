@@ -1,0 +1,14 @@
+# Third-party packages imported by product/. Pin these to the versions of the environment where the
+# model was trained/evaluated (e.g. `pip freeze | grep -iE "^(torch|transformers|peft|bitsandbytes)=="`).
+torch
+torchaudio
+torchcodec        # needed by torchaudio >= 2.9 for torchaudio.load (mp3/m4a also need ffmpeg installed)
+transformers
+peft
+bitsandbytes      # 4-bit (nf4) loading of the LLM; CUDA GPU required
+accelerate        # required by transformers for quantized loading
+safetensors
+numpy
+pyyaml
+jiwer             # only for --manifest scoring
+# optional: matplotlib (debug plots in continuous_fusion_utils), tqdm/datasets (fair_eval batch helpers)

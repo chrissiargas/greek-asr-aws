@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from typing import Optional
 import math
 import matplotlib.pyplot as plt
-from speechLM_utils.downsamplers import ReshapeAdapter
+from downsamplers import ReshapeAdapter
 
 
 class SinusoidalPositionalEmbedding(nn.Module):

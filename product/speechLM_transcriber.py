@@ -1,15 +1,15 @@
 """Black-box Greek ASR on top of a trained Dual-Fusion checkpoint.
 
-Put this file in evaluations/ (next to fair_speechLM.py). The model is read from ./checkpoints
-(in the repo root), which must look like this:
+Lives in product/ next to fair_speechLM.py, fair_eval.py, model.py, parser.py. The model is read from
+product/checkpoints (next to this file, wherever you run it from; --checkpoint_dir overrides it):
 
     checkpoints/
         config.json          # from the training run folder
         checkpoint-XXXX/     # model.safetensors (or shards), trainer_state.json
 
-Python, with the default model (exp 1, legacy decoding, clean style):
+Python, with the default model (legacy decoding, clean style):
 
-    from evaluations.speechLM_transcriber import DualFusionASR
+    from speechLM_transcriber import DualFusionASR
     from sample_asr_input import transcribe_folder
 
     asr = DualFusionASR()
@@ -17,8 +17,12 @@ Python, with the default model (exp 1, legacy decoding, clean style):
 
 Command line, with one audio file or a folder of audio files:
 
-    python evaluations/speechLM_transcriber.py /path/to/clip.wav
-    python evaluations/speechLM_transcriber.py /path/to/audio_dir --batch_size 8 --out results.jsonl
+    python product/speechLM_transcriber.py /path/to/clip.wav
+    python product/speechLM_transcriber.py /path/to/audio_dir --batch_size 8 --out results.jsonl
+
+Add --manifest to score the transcripts against reference texts (WER / CER, printed and saved next to --out):
+
+    python product/speechLM_transcriber.py /path/to/audio_dir --manifest refs.jsonl --out results.jsonl
 
 Everything (weight loading, position-id fix, decoding presets, style tags) is the same code path as
 fair_speechLM.py, so transcripts match the evaluation runs. Differences a user should know about:
@@ -167,15 +171,76 @@ class DualFusionASR:
         return {"segments": segments, "language": language}
 
 
+# ------------------------------------------------------------------ scoring against a manifest
+def load_references(manifest_path):
+    """Read a JSON-lines (or JSON list) manifest and return a lookup: audio path -> reference.
+
+    Each entry needs an audio path ("audio_filepath" or "audio_path") and a reference text
+    ("reference_raw" as in fair_eval manifests, "text" as in NeMo manifests, or "reference").
+    Relative audio paths are taken relative to the manifest's folder. If a full path does not
+    match, a file is matched by its name alone, as long as that name is unique in the manifest."""
+    base = dirname(abspath(manifest_path))
+    with open(manifest_path, encoding="utf-8") as f:
+        content = f.read().strip()
+    entries = json.loads(content) if content.startswith("[") else \
+        [json.loads(line) for line in content.splitlines() if line.strip()]
+
+    by_path, by_name = {}, {}
+    for entry in entries:
+        audio = entry.get("audio_filepath") or entry.get("audio_path")
+        reference = next((entry[k] for k in ("reference_raw", "text", "reference") if entry.get(k) is not None), None)
+        if audio is None or reference is None:
+            continue
+        item = {"reference": reference, "duration": entry.get("duration")}
+        by_path[os.path.normpath(os.path.join(base, os.path.expanduser(audio)))] = item
+        by_name.setdefault(os.path.basename(audio), []).append(item)
+
+    def lookup(audio_path):
+        hit = by_path.get(os.path.normpath(abspath(os.path.expanduser(audio_path))))
+        if hit is not None:
+            return hit
+        same_name = by_name.get(os.path.basename(audio_path), [])
+        return same_name[0] if len(same_name) == 1 else None
+
+    return lookup
+
+
+def score_against_manifest(results, manifest_path):
+    """Add "reference" and per-file "wer" to every result found in the manifest and return the
+    corpus-level metrics (same normalization and numbers as fair_eval), or None if nothing matched."""
+    lookup = load_references(manifest_path)
+    matched, records = [], []
+    for row in results:
+        ref = lookup(row["audio_path"])
+        if ref is None:
+            continue
+        row["reference"] = ref["reference"]
+        matched.append(row)
+        records.append({"reference_raw": ref["reference"], "hypothesis_raw": row["text"],
+                        "duration": row.get("duration") or ref["duration"] or 0.0,
+                        "hit_cap": row.get("hit_cap", False)})
+
+    missing = len(results) - len(matched)
+    if missing:
+        print(f"WARNING: {missing} of {len(results)} files have no entry in {manifest_path} and are not scored")
+    if not matched:
+        return None
+
+    for row, (sub, dele, ins, n_ref) in zip(matched, fe.utterance_table(records)["n_wer"]):
+        row["wer"] = round(float(sub + dele + ins) / n_ref, 4) if n_ref else None
+    return fe.score_records(records)
+
+
 if __name__ == "__main__":
     import argparse
 
     # the coworker's file; must be importable (same folder, repo root, or PYTHONPATH)
-    from sample_asr_input import load_audio_as_numpy, transcribe_folder
+    from sample_asr_input import iter_audio_batches, load_audio_as_numpy
 
     p = argparse.ArgumentParser()
     p.add_argument("path", help="one audio file or a folder of audio files")
     p.add_argument("--out", default=None, help="optional .jsonl file for the results")
+    p.add_argument("--manifest", default=None, help="optional .jsonl with reference texts; enables scoring")
     p.add_argument("--checkpoint_dir", default=DEFAULT_CHECKPOINT_DIR)
     p.add_argument("--decoding", default=DEFAULT_DECODING, choices=fe.presets_for("dual_fusion"))
     p.add_argument("--style", default=DEFAULT_STYLE, choices=["clean", "formal", "verbatim", "auto", "off"])
@@ -186,17 +251,39 @@ if __name__ == "__main__":
     asr = DualFusionASR(a.checkpoint_dir, decoding=a.decoding, style=a.style, sample_rate=a.sample_rate)
 
     if os.path.isdir(a.path):  # batch: every audio file in the folder
-        results = transcribe_folder(a.path, asr, sample_rate=a.sample_rate, batch_size=a.batch_size)
-    else:                      # single file, same output format
-        wave = load_audio_as_numpy(a.path, sample_rate=a.sample_rate)
-        out = asr.transcribe([wave], batch_size=1)
-        seg = out["segments"][0]
-        results = [{"audio_path": a.path, "text": seg["text"], "score": seg["score"],
-                    "words": seg["words"], "language": out["language"]}]
+        batches = iter_audio_batches(a.path, sample_rate=a.sample_rate, batch_size=a.batch_size)
+    else:                      # single file
+        batches = [([a.path], [load_audio_as_numpy(a.path, sample_rate=a.sample_rate)])]
+
+    out_file = open(a.out, "w", encoding="utf-8") if a.out else None
+    results = []
+    for paths, waves in batches:
+        out = asr.transcribe(waves, batch_size=a.batch_size, timestamps=False)
+        for path, seg in zip(paths, out["segments"]):
+            results.append({"audio_path": str(path), "text": seg["text"], "score": seg["score"],
+                            "words": seg["words"], "language": out["language"],
+                            "duration": round(seg["end"], 3), "hit_cap": seg["hit_cap"]})
+            if out_file:
+                out_file.write(json.dumps(results[-1], ensure_ascii=False) + "\n")
+                out_file.flush()
+    if out_file:
+        out_file.close()
+
+    metrics = score_against_manifest(results, a.manifest) if a.manifest else None
 
     lines = [json.dumps(r, ensure_ascii=False) for r in results]
-    print("\n".join(lines))
     if a.out:
-        with open(a.out, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+        if metrics is not None:  # rewrite with the added "reference" and "wer" fields
+            with open(a.out, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
         print(f"wrote {len(lines)} results to {a.out}")
+    else:
+        print("\n".join(lines))
+
+    if metrics is not None:
+        fe.print_metrics(f"scored against {a.manifest}", metrics)
+        if a.out:
+            metrics_file = os.path.splitext(a.out)[0] + ".metrics.json"
+            with open(metrics_file, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, ensure_ascii=False, indent=2)
+            print(f"wrote metrics to {metrics_file}")
