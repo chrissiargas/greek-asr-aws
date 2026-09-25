@@ -232,11 +232,9 @@ def score_against_manifest(results, manifest_path):
         row["wer"] = round(float(sub + dele + ins) / n_ref, 4) if n_ref else None
     return fe.score_records(records)
 
-
 if __name__ == "__main__":
     import argparse
-
-    # the coworker's file; must be importable (same folder, repo root, or PYTHONPATH)
+    import time
     from sample_asr_input import iter_audio_batches, load_audio_as_numpy
 
     p = argparse.ArgumentParser()
@@ -250,34 +248,49 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=4)
     a = p.parse_args()
 
+    rank, world, _ = fe.dist_info()
     asr = DualFusionASR(a.checkpoint_dir, decoding=a.decoding, style=a.style, sample_rate=a.sample_rate)
 
-    if os.path.isdir(a.path):  # batch: every audio file in the folder
-        batches = iter_audio_batches(a.path, sample_rate=a.sample_rate, batch_size=a.batch_size)
-    else:                      # single file
-        batches = [([a.path], [load_audio_as_numpy(a.path, sample_rate=a.sample_rate)])]
+    if os.path.isdir(a.path):
+        all_batches = list(iter_audio_batches(a.path, sample_rate=a.sample_rate, batch_size=a.batch_size))
+    else:
+        all_batches = [([a.path], [load_audio_as_numpy(a.path, sample_rate=a.sample_rate)])]
 
-    out_file = open(a.out, "w", encoding="utf-8") if a.out else None
+    # Shard batches across GPUs
+    my_batches = all_batches[rank::world]
+
     results = []
-    for paths, waves in batches:
+    for paths, waves in my_batches:
         out = asr.transcribe(waves, batch_size=a.batch_size, timestamps=False)
         for path, seg in zip(paths, out["segments"]):
             results.append({"audio_path": str(path), "text": seg["text"], "score": seg["score"],
                             "words": seg["words"], "language": out["language"],
-                            "duration": round(seg["end"], 3), "hit_cap": seg["hit_cap"]})
-            if out_file:
-                out_file.write(json.dumps(results[-1], ensure_ascii=False) + "\n")
-                out_file.flush()
-    if out_file:
-        out_file.close()
+                            "duration": round(seg["end"], 3), "hit_cap": seg.get("hit_cap", False)})
+
+    # If running on >1 GPU, gather shards on rank 0
+    if world > 1:
+        shard_base = a.out or "tmp_transcribe"
+        shard_file = f"{shard_base}.rank{rank}.jsonl"
+        done_file = f"{shard_base}.rank{rank}.done"
+        fe._write_jsonl(shard_file, results)
+        fe._write_json(done_file, {"n": len(results)})
+        if rank != 0:
+            sys.exit(0)
+        for r in range(world):
+            while not os.path.exists(f"{shard_base}.rank{r}.done"):
+                time.sleep(1)
+        results = [rec for r in range(world) for rec in fe._read_jsonl(f"{shard_base}.rank{r}.jsonl")]
+        results.sort(key=lambda x: x["audio_path"])
+        for r in range(world):
+            os.remove(f"{shard_base}.rank{r}.jsonl")
+            os.remove(f"{shard_base}.rank{r}.done")
 
     metrics = score_against_manifest(results, a.manifest) if a.manifest else None
 
     lines = [json.dumps(r, ensure_ascii=False) for r in results]
     if a.out:
-        if metrics is not None:  # rewrite with the added "reference" and "wer" fields
-            with open(a.out, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+        with open(a.out, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
         print(f"wrote {len(lines)} results to {a.out}")
     else:
         print("\n".join(lines))
