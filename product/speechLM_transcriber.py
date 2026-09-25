@@ -156,18 +156,20 @@ class DualFusionASR:
                     owner.append(i)
 
         texts = [[] for _ in waves]
+        hit_caps = [False for _ in waves]
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start:start + batch_size]
             outputs = self._engine.transcribe([{"dataset_name": None}] * len(batch), batch)
             for i, out in zip(owner[start:start + batch_size], outputs):
                 if out["hit_cap"]:
+                    hit_caps[i] = True
                     warnings.warn(f"input {i}: output hit the token cap and may be truncated")
                 if out["hypothesis_raw"]:
                     texts[i].append(out["hypothesis_raw"])
 
         segments = [{"text": " ".join(t), "score": 0.0, "start": 0.0,
-                     "end": len(w) / MODEL_SR, "words": []}
-                    for t, w in zip(texts, waves)]
+                     "end": len(w) / MODEL_SR, "words": [], "hit_cap": hc}
+                    for t, w, hc in zip(texts, waves, hit_caps)]
         return {"segments": segments, "language": language}
 
 
