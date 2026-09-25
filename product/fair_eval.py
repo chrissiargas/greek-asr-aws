@@ -8,6 +8,7 @@ import sys
 import time
 from importlib.metadata import version as package_version
 from os.path import abspath, dirname
+import unicodedata
 
 sys.path.insert(0, dirname(dirname(abspath(__file__))))
 try:  # keep the project's cache/env conventions; must run before any Hugging Face import
