@@ -1,0 +1,196 @@
+data_args:
+  tmpdir: "tmp"
+  hf_cache: "~/cache/huggingface"
+  dataset_path: "cache/datasets"
+  language: 'greek'
+  sampling_rate: 16000
+  other_to_train: True
+
+main_args:
+  #'common_voice', 'fleurs', 'massive', 'voxpopuli', 'yodas', 'dataocean_asr_657', 'dataocean_asr_659', 'datatang_asr_1', 'datatang_asr_2'
+  datasets:
+    - common_voice
+    - fleurs
+    - massive
+    - voxpopuli
+    - yodas
+    - dataocean_asr_657
+    - dataocean_asr_659
+    - datatang_asr_1
+    - datatang_asr_2
+  split_type: 'default'
+  splitting: false
+  results_path: "cache/results"
+  checkpoint_path: "cache/checkpoints"
+
+dual_fuse_args:
+  checkpoint_path: "cache/checkpoints"
+   ## Data Configurations
+  interleave_temperature: 1.2
+  normalize: default
+  micro_data: False
+  micro_size: 100
+  randomize: True
+  norm_mono: False
+  ## Regularization & Augmentation Configurations
+  blank_training: False
+  audio_dropout: 0.1
+  text_perturbation: True
+  text_dropout: 0.1
+  spec_augment: True
+  ## Input Injection Configurations
+  include_adapter: True
+  hidden_dim: 2048
+  static_projector: False
+  downsample_K: 5
+  input_downsample: 'reshape'
+  ## Cross-Attention Injection Configurations
+  static_injection_layers: False
+  downsample_L: 3
+  injection_downsample: 'conv1d'
+  injection_layers: [10, 20, 30]
+  pyramid_layers: False
+  downsamplers: 'injection_common' # common, injection_common, different
+  causal_fusion: False
+  gated_cross_attention: True
+  positional_info: False
+  layer_wise_fusion: True
+  layer_weights_static: False
+  ## LoRA Configurations
+  linguistic_lora: True
+  acoustic_lora: False
+  lora_r: 64
+  lora_params: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  proj_lr: 0.0001
+  lora_lr: 0.0001
+  two_stage: False
+  ## Auxiliary Losses Configurations
+  predict_duration: False
+  duration_resolution: 0.1
+  max_duration: 30.0
+  ctc: False
+  audio_forecasting: False
+  duration_weight: 0.4
+  ctc_weight: 0.4
+  audio_weight: 0.4
+  ## Training Behavior Configurations
+  early_stopping_patience: 15
+  first_stage_epochs: 5
+  second_stage_epochs: 20
+  ## Prompt Configurations
+  prompt_persona: none
+  prompt_instruction: "\nΜετάγραψε το προηγούμενο ηχητικό απόσπασμα σε ελληνικό κείμενο με απόλυτη ακρίβεια."
+  prompt_verbatim: True
+  training_args: {
+    # --- PERFORMANCE OPTIMIZATIONS ---
+    'bf16': True,                   # CRITICAL: Native speed for Titan RTX
+    'dataloader_num_workers': 4,    # Optimized for 14-core CPU (3 workers * 4 GPUs = 12 threads)
+    'dataloader_pin_memory': True,  # Fast CPU->GPU transfer
+    'per_device_train_batch_size': 4, # Maximize VRAM usage
+    'gradient_accumulation_steps': 4,  # Effective Batch = 8 * 4 * 2 = 96
+    'gradient_checkpointing': True,
+    'gradient_checkpointing_kwargs': {'use_reentrant': False},
+    'ddp_find_unused_parameters': True,
+
+    # --- TRAINING BEHAVIOR ---
+    'max_steps': 45000,
+    'warmup_steps': 500,
+    'lr_scheduler_type': 'cosine',
+    'weight_decay': 0.01,
+    'optim': 'adamw_torch',
+
+    # --- LOGGING & SAVING ---
+    'report_to': 'wandb',
+    'logging_steps': 10,
+    'save_strategy': 'steps',
+    'save_steps': 500,
+    'eval_strategy': 'steps',
+    'eval_steps': 500,
+    'save_total_limit': 3,
+    'eval_accumulation_steps': 4,
+    'per_device_eval_batch_size': 4,
+    'num_train_epochs': 60,
+
+    # --- CRITICAL MODEL SETTINGS ---
+    'remove_unused_columns': False, # REQUIRED for custom SlamDataCollator
+    'group_by_length': False,       # Prevent crash (missing input_ids)
+    'predict_with_generate': True,  # REQUIRED to calculate WER/CER during eval
+    'do_train': True,
+    'save_safetensors': False,
+
+    # --- EARLY STOPPING SETTINGS ---
+    'load_best_model_at_end': True,
+    'metric_for_best_model': 'eval_wer',
+    'greater_is_better': False,
+    'generation_max_length': 420,
+
+    'generation_config': {
+      'num_beams': 1,
+      'do_sample': False,
+      'max_new_tokens': 420,
+      'use_cache': True,
+    }
+  }
+
+eval_args:
+  training_args: {
+    'per_device_eval_batch_size': 4,
+    'eval_accumulation_steps': 4,
+    'remove_unused_columns': False,
+    'predict_with_generate': True,
+    'bf16': True,
+    'dataloader_num_workers': 4,
+    'dataloader_pin_memory': True,
+    'eval_strategy': 'no',
+    'report_to': 'none',
+    'generation_max_length': 512,
+    'generation_config': {
+      'num_beams': 4,
+      'do_sample': False,
+      'repetition_penalty': 1.15,
+      'length_penalty': 1.0,
+      'max_new_tokens': 512,
+      'use_cache': True,
+    }
+  }
+
+#slam_args:
+#  seed: 0
+#  num_train_epochs: 50
+#  training_args: {
+#    'train_on_source': False,
+#    'report_to': 'tensorboard',
+#    'optim': 'adamw_torch',
+#    'per_device_train_batch_size': 4,
+#    'gradient_accumulation_steps': 4,
+#    'max_steps': 40000,
+#    'weight_decay': 0.0,
+#    'learning_rate': 1e-4,
+#    'warmup_ratio': 0.1,
+#    'lr_scheduler_type': 'linear',
+#    'remove_unused_columns': False,
+#    'max_grad_norm': 0.3,
+#    'gradient_checkpointing': True,
+#    'logging_steps': 10,
+#    'group_by_length': True,
+#    'save_strategy': 'epoch',
+#    'save_steps': 250,
+#    'save_total_limit': 40,
+#    'generation_args': {
+#        'max_new_tokens': 32,
+#        'min_new_tokens': None,
+#        'do_sample': False,
+#        'num_beams': 1,
+#        'num_beam_groups': 1,
+#        'penalty_alpha': None,
+#        'use_cache': True,
+#        'temperature': 1.0,
+#        'top_k': 50,
+#        'top_p': 1.0,
+#        'typical_p': 1.0,
+#        'repetition_penalty': 1.0,
+#        'length_penalty': 1.0,
+#        'no_repeat_ngram_size': 0,
+#        'diversity_penalty': 0.0
+#      }
+#  }
