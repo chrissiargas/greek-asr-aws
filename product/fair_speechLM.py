@@ -41,9 +41,7 @@ QUANT_STATE_MARKERS = ("absmax", "quant_map", "quant_state", "bitsandbytes", "ne
 
 
 # ============================================================================ checkpoint
-def resolve_checkpoint(checkpoint_path, explicit, select):
-    if explicit:
-        return explicit
+def resolve_checkpoint(checkpoint_path, select):
     last = os.path.join(checkpoint_path, f"checkpoint-{get_max_step(checkpoint_path)}")
     if select == "last":
         return last

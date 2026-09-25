@@ -31,9 +31,15 @@ import os
 import sys
 import warnings
 from os.path import abspath, dirname
+import logging
+sys.path.insert(0, dirname(dirname(os.path.abspath(__file__))))
 
-REPO_ROOT = dirname(dirname(abspath(__file__)))
-sys.path.insert(0, REPO_ROOT)
+logging.disable(logging.CRITICAL)
+from environment import set_environment
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+set_environment()
 
 import numpy as np
 import torch
@@ -44,14 +50,14 @@ from fair_speechLM import (DualFusionTranscriber, load_trained_weights, resolve_
 from model import get_model
 from utils import init, init_gpu
 from parser import Parser
+
 # ------------------------------------------------------------------ default model
-DEFAULT_CHECKPOINT_DIR = os.path.join(REPO_ROOT, "checkpoints")
-DEFAULT_EXP = 1
+DEFAULT_CHECKPOINT_DIR = os.path.join('.', "checkpoints")
 DEFAULT_DECODING = "legacy"
 DEFAULT_STYLE = "clean"
+STYLE_ALIASES = {"clean": "formal"}  # clean = normalized transcription prompt (PROMPT_FORMAL)
 SPEECH_ENCODER_ID = "openai/whisper-large-v3"
 LANGUAGE_MODEL_ID = "ilsp/Llama-Krikri-8B-Instruct"
-STYLE_ALIASES = {"clean": "formal"}  # clean = normalized transcription prompt (PROMPT_FORMAL)
 
 MODEL_SR = fe.SAMPLING_RATE  # 16 kHz, what Whisper's feature extractor expects
 CHUNK_S = fe.MAX_AUDIO_S     # the encoder sees at most 30 s at once
@@ -73,13 +79,13 @@ def split_long_audio(wave, sr=MODEL_SR):
     return chunks
 
 
-def load_model_args(checkpoint_dir, exp):
+def load_model_args(checkpoint_dir):
     """YAML defaults of `exp`, overridden by the run's config.json (same rule as utils.init)."""
     config_file = os.path.join(checkpoint_dir, "config.json")
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"{config_file} not found; copy config.json from the training run folder")
     conf = Parser()
-    conf.get_args(exp)
+    conf.get_args()
     args = conf.dual_fuse_args
     with open(config_file, encoding="utf-8") as f:
         args.__dict__.update(json.load(f))
@@ -89,28 +95,21 @@ def load_model_args(checkpoint_dir, exp):
 class DualFusionASR:
     def __init__(self,
                  checkpoint_dir=DEFAULT_CHECKPOINT_DIR,  # folder with config.json + checkpoint-N/
-                 exp=DEFAULT_EXP,
-                 checkpoint=None,             # explicit checkpoint-N directory; overrides `select`
                  select="last",               # "last" or "best" (from trainer_state.json)
                  decoding=DEFAULT_DECODING,   # "legacy", "plain" or "penalized"
                  style=DEFAULT_STYLE,         # "clean"/"formal", "verbatim", "auto" or "off"
                  sample_rate=16000,           # rate of the arrays you will pass (16000 or 24000)
-                 speech_encoder_id=SPEECH_ENCODER_ID,
-                 language_model_id=LANGUAGE_MODEL_ID):
+                 ):
         if sample_rate not in (16000, 24000):
             raise ValueError("sample_rate must be 16000 or 24000")
         self.sample_rate = sample_rate
 
-        checkpoint_dir = abspath(checkpoint_dir)
-        if checkpoint is None and not any(n.startswith("checkpoint-") for n in os.listdir(checkpoint_dir)):
-            raise FileNotFoundError(f"no checkpoint-N folder inside {checkpoint_dir}")
-
         _, device = init_gpu()
-        model_args = load_model_args(checkpoint_dir, exp)
-        info = {"speech_encoder_id": speech_encoder_id, "language_model_id": language_model_id}
-        model, _ = get_model(model_args, info, device, exp=exp)
+        model_args = load_model_args(checkpoint_dir)
+        info = {"speech_encoder_id": SPEECH_ENCODER_ID, "language_model_id": LANGUAGE_MODEL_ID}
+        model, _ = get_model(model_args, info, device)
 
-        self.checkpoint = abspath(resolve_checkpoint(checkpoint_dir, checkpoint, select))
+        self.checkpoint = abspath(resolve_checkpoint(checkpoint_dir, select))
         load_trained_weights(model, self.checkpoint)
         model.eval()
         use_training_position_ids(model)
@@ -124,8 +123,8 @@ class DualFusionASR:
         if style != "off" and not trained_with_tags:
             raise ValueError("this checkpoint was trained without style tags; use style='off'")
 
-        self._engine = DualFusionTranscriber(model, model.language_tokenizer, device,
-                                             decoding, None, style)
+        self._engine = DualFusionTranscriber(model, model.language_tokenizer, device, decoding, None, style)
+
         print(f"DualFusionASR ready: {self.checkpoint} | decoding={decoding} | style={style}")
 
     def _to_model_rate(self, wave, sr):
@@ -178,16 +177,13 @@ if __name__ == "__main__":
     p.add_argument("path", help="one audio file or a folder of audio files")
     p.add_argument("--out", default=None, help="optional .jsonl file for the results")
     p.add_argument("--checkpoint_dir", default=DEFAULT_CHECKPOINT_DIR)
-    p.add_argument("--exp", type=int, default=DEFAULT_EXP)
-    p.add_argument("--checkpoint", default=None)
     p.add_argument("--decoding", default=DEFAULT_DECODING, choices=fe.presets_for("dual_fusion"))
     p.add_argument("--style", default=DEFAULT_STYLE, choices=["clean", "formal", "verbatim", "auto", "off"])
     p.add_argument("--sample_rate", type=int, default=16000, choices=[16000, 24000])
     p.add_argument("--batch_size", type=int, default=4)
     a = p.parse_args()
 
-    asr = DualFusionASR(a.checkpoint_dir, a.exp, checkpoint=a.checkpoint,
-                        decoding=a.decoding, style=a.style, sample_rate=a.sample_rate)
+    asr = DualFusionASR(a.checkpoint_dir, decoding=a.decoding, style=a.style, sample_rate=a.sample_rate)
 
     if os.path.isdir(a.path):  # batch: every audio file in the folder
         results = transcribe_folder(a.path, asr, sample_rate=a.sample_rate, batch_size=a.batch_size)
