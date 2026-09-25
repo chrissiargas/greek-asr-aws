@@ -1,5 +1,4 @@
 
-import argparse
 import hashlib
 import json
 import math
@@ -7,7 +6,6 @@ import os
 import re
 import sys
 import time
-import unicodedata
 from importlib.metadata import version as package_version
 from os.path import abspath, dirname
 
@@ -98,52 +96,6 @@ def as_list(value):
     if value is None:
         return []
     return list(value) if isinstance(value, (list, tuple, set)) else [value]
-
-
-def build_manifest(exp, datasets, split, out_path, check_train_overlap=True):
-    from config.parser import Parser
-    from preprocessing.prepare import get_data
-    from preprocessing.split import splitter
-
-    conf = Parser()
-    conf.get_args(exp)
-    splits = splitter(conf=conf).split(datasets=list(datasets))
-    raw = get_data(splits[split], "", process=False, filters=None, split=split)
-
-    rows, dropped = [], []
-    for name, items in raw.items():
-        for item in items:
-            reference = item.get("text") or ""
-            row = {"id": f"{name}:{item['index']}", "dataset_name": name, "index": int(item["index"]),
-                   "audio_filepath": item["audio_filepath"], "reference_raw": reference,
-                   "duration": float(item.get("duration") or 0.0)}
-            keep = normalize_nwer(reference) and normalize_wer_punct(reference)
-            (rows if keep else dropped).append(row)
-    rows.sort(key=lambda r: (r["dataset_name"], r["index"]))
-    ids = [r["id"] for r in rows]
-    if len(ids) != len(set(ids)):
-        raise RuntimeError("duplicate utterance ids in the requested split")
-
-    os.makedirs(dirname(abspath(out_path)), exist_ok=True)
-    _write_jsonl(out_path, rows)
-    language = str(getattr(conf, "language", "")).lower()
-    meta = {"exp": exp, "datasets": list(datasets), "split": split,
-            "language": language, "language_code": LANG_CODES.get(language),
-            "n_rows": len(rows), "n_over_30s": sum(r["duration"] > MAX_AUDIO_S for r in rows),
-            "n_dropped_empty_reference": len(dropped), "dropped_ids": [r["id"] for r in dropped],
-            "sha256": _sha256(out_path)}
-
-    if check_train_overlap and split != "train":
-        # Speaker-disjoint splits are not text-disjoint; an LLM decoder can exploit repeated sentences.
-        train = get_data(splits["train"], "", process=False, filters=None, split="train")
-        train_texts = {normalize_nwer(it.get("text") or "") for items in train.values() for it in items}
-        overlap = [r["id"] for r in rows if normalize_nwer(r["reference_raw"]) in train_texts]
-        meta["n_reference_text_also_in_train"] = len(overlap)
-        meta["reference_text_also_in_train_ids"] = overlap
-
-    _write_json(f"{out_path}.meta.json", meta)
-    return meta
-
 
 def load_manifest(path):
     with open(f"{path}.meta.json", encoding="utf-8") as f:
@@ -503,40 +455,3 @@ def compare_runs(dir_a, dir_b, n_boot=2000, seed=0):
     cap_b = sum(bool(r.get("hit_cap")) for r in records_b)
     print(f"\nOutputs that hit the token cap: A={cap_a}, B={cap_b} (should be 0 in the controlled comparison)")
 
-
-# ============================================================================ CLI
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    build = sub.add_parser("build-manifest", help="freeze the test set shared by all systems")
-    build.add_argument("--exp", type=int, required=True)
-    build.add_argument("--datasets", nargs="+", required=True)
-    build.add_argument("--split", default="test")
-    build.add_argument("--out", required=True)
-    build.add_argument("--skip_train_overlap", action="store_true")
-
-    score = sub.add_parser("score", help="re-score a finished run with the current normalizer")
-    score.add_argument("run_dir")
-
-    compare = sub.add_parser("compare", help="paired bootstrap between two runs on the same manifest")
-    compare.add_argument("run_a")
-    compare.add_argument("run_b")
-    compare.add_argument("--n_boot", type=int, default=2000)
-    compare.add_argument("--seed", type=int, default=0)
-
-    args = parser.parse_args()
-    if args.command == "build-manifest":
-        meta = build_manifest(args.exp, args.datasets, args.split, args.out, not args.skip_train_overlap)
-        print(json.dumps({k: v for k, v in meta.items() if not k.endswith("_ids")}, indent=2, ensure_ascii=False))
-    elif args.command == "score":
-        config, records = load_run(args.run_dir)
-        metrics = score_records(records)
-        _write_json(os.path.join(args.run_dir, "metrics.json"), metrics)
-        print_metrics(f"{config['system']} [{config['decoding']['preset']}]", metrics)
-    else:
-        compare_runs(args.run_a, args.run_b, args.n_boot, args.seed)
-
-
-if __name__ == "__main__":
-    main()

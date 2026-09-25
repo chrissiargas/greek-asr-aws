@@ -48,7 +48,7 @@ import torchaudio.functional as AF
 import fair_eval as fe
 from fair_speechLM import (DualFusionTranscriber, load_trained_weights, resolve_checkpoint, use_training_position_ids)
 from model import get_model
-from utils import init, init_gpu
+from utils import init_gpu
 from parser import Parser
 
 # ------------------------------------------------------------------ default model

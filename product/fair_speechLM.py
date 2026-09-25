@@ -29,9 +29,18 @@ from transformers import GenerationConfig
 transformers.logging.set_verbosity_error()
 
 from evaluations import fair_eval as fe
-from speechLM_utils.data_collator import DATASET_PROMPT_MAP, PROMPT_FORMAL, PROMPT_VERBATIM
-from speechLM_utils.model import get_max_step, get_model
-from speechLM_utils.utils import init, init_gpu
+from model import get_max_step, get_model
+from utils import init_gpu
+
+PROMPT_VERBATIM = "Κατά λέξη μεταγραφή: "
+PROMPT_FORMAL = "Κανονικοποιημένη μεταγραφή: "
+
+DATASET_PROMPT_MAP = {
+    'common_voice': PROMPT_VERBATIM,
+    'fleurs': PROMPT_VERBATIM,
+    'logotypographia': PROMPT_VERBATIM,
+    'stoma': PROMPT_VERBATIM
+}
 
 # Parameters that were trained (bridge + LoRA) and therefore must come from the checkpoint.
 TRAINED_PARAM_MARKERS = ("lora_", "adapter.", "input_downsampler", "injection_downsampler",
@@ -189,46 +198,3 @@ def parse_args():
     parser.add_argument("--train_datasets", nargs="+",
                         default=["common_voice", "fleurs", "hparl", "tedx", "logotypographia"])
     return parser.parse_args()  # strict: an old --gen_kwargs now fails instead of being ignored
-
-
-def main():
-    args = parse_args()
-    fe.prepare_out_dir(args.out, args.overwrite)
-    rows, meta = fe.load_manifest(args.manifest)
-    _, device = init_gpu()
-
-    model_name = f"{args.speech_encoder_id.split('/')[1]}_{args.language_model_id.split('/')[1]}"
-    info = {"res_folder": args.out, "train_dataset": args.train_datasets, "checkpoint_folder": args.checkpoint_folder,
-            "model_name": model_name, "speech_encoder_id": args.speech_encoder_id,
-            "language_model_id": args.language_model_id, "bit4": True, "machine": args.machine,
-            "datetime": args.datetime, "turn": args.turn, "exp": args.exp, "name": args.name,
-            "gen_kwargs": None, "concat_test": False, "test_dataset": meta["datasets"]}
-    _, model_args, _, _, checkpoint_path, checkpoint_dir, _ = init(info, restart=False)
-
-    model, _ = get_model(model_args, info, device)
-    tokenizer = model.language_tokenizer  # the model sets pad = eos when the tokenizer has no pad token
-    checkpoint = resolve_checkpoint(checkpoint_path, args.checkpoint or checkpoint_dir, args.select)
-    load_trained_weights(model, checkpoint)
-    model.eval()
-    if args.position_ids == "train":
-        use_training_position_ids(model)
-
-    style_tags = args.style_tags
-    if style_tags == "auto":
-        style_tags = "dataset" if getattr(model, "prompt_verbatim", False) else "off"
-
-    transcriber = DualFusionTranscriber(model, tokenizer, device, args.decoding, args.max_new_tokens, style_tags)
-    run_config = fe.base_run_config(
-        "dual_fusion", args.manifest, meta, transcriber.decoding_description, args.batch_size,
-        model.processor.feature_extractor,
-        checkpoint=abspath(checkpoint), exp=args.exp, language_model=args.language_model_id,
-        speech_encoder=args.speech_encoder_id, style_tags=style_tags, position_ids=args.position_ids,
-        llm_quantization="nf4-4bit")
-    fe.run_sharded(transcriber, rows, meta, args.out, args.batch_size, run_config)
-
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
-
-
-if __name__ == "__main__":
-    main()

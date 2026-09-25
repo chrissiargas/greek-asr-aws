@@ -1,13 +1,22 @@
 from typing import Dict
 
-from speechLM_utils.dual_fusion_model import DualFusionModel
+from dual_fusion_model import DualFusionModel
 import torch
-from speechLM_utils.checkpoint import get_max_step
 import os
 import torch.nn as nn
-from os.path import join
+from os.path import join, isdir
 import json
 import safetensors
+
+def get_max_step(checkpoint_dir):
+    max_step = 0
+    for filename in os.listdir(checkpoint_dir):
+        if isdir(join(checkpoint_dir, filename)) and filename.startswith(
+                "checkpoint"
+        ):
+            max_step = max(max_step, int(filename.replace("checkpoint-", "")))
+
+    return max_step
 
 def load_weights(model: nn.Module, checkpoint_path: str, args: Dict, device: str = 'cuda'):
     max_step = get_max_step(checkpoint_path)
