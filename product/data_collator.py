@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Dict, Sequence
+from typing import Dict, Sequence
 import torch
 from transformers import WhisperProcessor, AutoTokenizer
 

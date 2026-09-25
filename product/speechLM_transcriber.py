@@ -135,7 +135,7 @@ class DualFusionASR:
             wave = AF.resample(torch.from_numpy(wave), sr, MODEL_SR).numpy()
         return wave
 
-    def transcribe(self, audio, batch_size=32, timestamps=True, language="el", sample_rate=None):
+    def transcribe(self, audio, batch_size=4, timestamps=True, language="el", sample_rate=None):
         if language != "el":
             warnings.warn(f"the model only transcribes Greek; language='{language}' is ignored")
         if timestamps:
